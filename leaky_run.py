@@ -151,6 +151,16 @@ def find_edge(nav_frame, l_bound, u_bound, thresh_state, direction, location, rc
     
 
 def main():
+    # currently: not much improved over if-then state machine implementation
+
+    # We should make this event/interrupt driven - the system constantly polls for
+    # - bump triggers
+    # - visual signals
+    # - humidity signals
+    # and decides what to do based on the state, rather than polling different sensors 
+    # depending on the state.
+    
+    
 	# Initialise cameras - hold auto white balance constant to improve filtering
     camgain = (1.4,2.1)
     picam.camera.awb_mode = 'off'
@@ -190,12 +200,21 @@ def main():
     print("Waiting for block ...")
     
     while running:
-        # should be a faster method than if/elif for handling state?
+        # poll each event, all functional transition code should be in the class
         
         # for debugging/testing: send camera images to screen (when relevant)        
-        key = cv2.waitKey(1) & 0xFF        
-        #print(leaky1.state)
-            
+        key = cv2.waitKey(1) & 0xFF
+        
+        # TODO: event-driven implementation
+        # read voltage
+        # trigger button push on correct voltage. 
+        # parse visual information (threading)
+        # trigger edge detection, etc.
+        # read humidity sensors
+        # trigger humidity changes
+        
+        
+                    
         if leaky1.state in ['waiting', 'sensing']:
             if leaky1.state == 'waiting':
                 try:
@@ -348,8 +367,9 @@ def main():
                         leaky1.wall_found()
                 
                 else:
-                    print("How did I get here? Entering wait state ..."
-                    leaky1.close_to_home()                    
+                    print("How did I get here? Entering wait state ...")
+                    leaky1.state = 'go_home'
+                    leaky1.close_to_home()                
         
              
             elif leaky1.state == 'deposit':
