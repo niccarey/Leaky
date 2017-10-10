@@ -11,12 +11,14 @@ class LeakyBot(object):
     states = ['waiting', 'turning', 'sensing', 'deposit', 'backup', 'go_home']
     
     transitions = [ {'trigger':'button_push', 'source':'waiting', 'dest':'turning'},
+        {'trigger':'button_push', 'source':'deposit', 'dest':'backup'},
         {'trigger':'walls_balanced', 'source':'turning', 'dest':'sensing', 'conditions':['do_have_block', 'do_high_humidity']}, 
         {'trigger':'low_humidity', 'source':'sensing', 'dest':'turning'},
         {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'conditions':'do_have_block'},
         {'trigger':'reached_wall', 'source':'deposit', 'dest':'backup'},
         {'trigger':'home_spotted', 'source':'backup', 'dest':'go_home', 'unless':'do_have_block'},
-        {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'} ]
+        {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'},
+        {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'} ]
         
         
     high_humidity = True
