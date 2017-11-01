@@ -25,15 +25,7 @@ class LeakyBot(object):
         {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'} ]
         
         
-    high_humidity = True
-    have_block = False
-    speed = 0
-    threshold_state = 'leq'
-    deposit_direction = 'left'
     start_turning_frame = 0
-    
-    driving_clock = 0
-    sensing_clock = 0
     
     # won't need this once humidity sensing is added
     sensor_loop = 0
@@ -48,6 +40,15 @@ class LeakyBot(object):
         self.motor_left = motor_left
         self.motor_right = motor_right
         #self.get_graph().draw('state_diagram.png', prog='dot')
+        
+        self.driving_clock = 0
+        self.sensing_clock = 0
+        
+        self.cam_flag = 1
+        self.threshold_state = 'leq'
+        self.speed = 0
+        self.high_humidity = True
+        self.have_block = False
         
     
     def do_have_block(self):
@@ -91,7 +92,7 @@ class LeakyBot(object):
         
         
     def set_deposit_direction(self):
-        if self.deposit_direction == 'left':
+        if self.cam_flag: 
             self.threshold_state = 'leq'
                             
         else:
@@ -103,15 +104,15 @@ class LeakyBot(object):
 
         if turn_dir:
             self.direction = 'left'
-            self.deposit_direction = 'left'
+            self.cam_flag = 1
             self.threshold_state = 'geq'
 
         else:
             self.direction = 'right'
-            self.deposit_direction = 'right'
+            self.cam_flag = 0
             self.threshold_state = 'leq'
             
-        print("Turning to deposit: ", self.deposit_direction)        
+        print("Turning to deposit: ", self.cam_flag)        
         self.set_motor_values(0,0)
         time.sleep(2)
         
@@ -126,12 +127,13 @@ class LeakyBot(object):
         self.have_block = True
         self.high_humidity = True
         self.start_turning_frame = 0
-        #turn_dir = bool(random.getrandbits(1))        
-        #if turn_dir:
-        #    self.direction = 'left'
-        #
-        #else:
-        self.direction = 'right'
+        
+        turn_dir = bool(random.getrandbits(1))        
+        if turn_dir:
+            self.direction = 'left'
+        
+        else:
+            self.direction = 'right'
         
     def on_enter_deposit(self):
         print(self.state)
@@ -150,7 +152,7 @@ class LeakyBot(object):
         print(self.state)
         self.direction = 'rev'
         # different to a normal turn, so:
-        if self.deposit_direction == 'left':
+        if self.cam_flag:
             self.set_motor_values(self.speed, 0)
             
         else:
@@ -194,7 +196,7 @@ class LeakyBot(object):
             ml.run(Adafruit_MotorHAT.FORWARD)
             mr.run(Adafruit_MotorHAT.BACKWARD)
             
-        elif check_dir == 'fwd':
+        else: 
             ml.run(Adafruit_MotorHAT.FORWARD)
             mr.run(Adafruit_MotorHAT.FORWARD)
             

@@ -31,7 +31,7 @@ def main():
     
     fcount = 1
     leaky1 = LeakyBot(myMotor1, myMotor2)
-    leaky1.speed = 140
+    leaky1.speed = 180
     leaky1.direction = 'fwd'
     running = True
 
@@ -40,7 +40,7 @@ def main():
         driving_time = 0
         sensing_time = 0
         leaky1.direction = 'fwd'
-        leaky1.set_motor_values(leaky1.speed)
+        leaky1.set_motor_values(leaky1.speed, leaky1.speed)
                 
         while (driving_time < 1):                    
             time.sleep(0.1)
@@ -49,7 +49,7 @@ def main():
                 
         print("finished driving -> sensing")
         # now stop
-        leaky1.set_motor_values(0)
+        leaky1.set_motor_values(0,0)
                 
         # some code here that reads our humidity sensors
         while (sensing_time < 4):
@@ -60,7 +60,7 @@ def main():
 
         fcount += 1
         
-        if fcount > 3:
+        if fcount > 6:
             running = False
 
 if __name__ == "__main__":
