@@ -4,7 +4,11 @@ from Adafruit_MotorHAT import Adafruit_MotorHAT
 import numpy as np 
 import threading
 import skimage
+import os
 from skimage.measure import structural_similarity as ssim
+
+from navImage import NavImage
+
 
 import imutils
 from imutils.video import VideoStream
@@ -29,28 +33,54 @@ picam = VideoStream(usePiCamera=True, resolution=(640,480)).start()
 
 time.sleep(0.5)
 
+print("Setting camera gains and white balance ")
+camgain = (1.4,2.1)
 picam.camera.awb_mode = 'off'
-picam.camera.awb_gains=g
+picam.camera.awb_gains = camgain
+
+os.system('v4l2-ctl --set-ctrl=white_balance_temperature_auto=0')
+os.system('v4l2-ctl --set-ctrl=white_balance_temperature=2800')
+os.system('v4l2-ctl --set-ctrl=exposure_auto=1')
+os.system('v4l2-ctl --set-ctrl=exposure_absolute=150')
+os.system('v4l2-ctl --set-ctrl=brightness=0')    
+
+
 
 # manual white balancing not possible with this driver (?)
 # should be ok as long as lighting conditions relatively static
 #webcam.stream.set(18,0.5)
 
 # Set up templates and image processing constants
+erode_kernel = np.ones((7,7), np.uint8)
+dilate_kernel = np.ones((7,7), np.uint8)
 
+l_red_left = np.array([170, 180, 0])
+u_red_left = np.array([180, 255, 255])
+l_red_right = np.array([0, 200, 0])
+u_red_right = np.array([10, 255, 255])
+
+l_blue_left = np.array([40, 100, 0])
+u_blue_left = np.array([70, 255, 255])
+l_blue_right = np.array([50, 100, 0])
+u_blue_right = np.array([90, 255, 255])
+
+# Matched filtering:
 kernsize = 17
-temp_size = 40
+temp_size = 30
 temp_blur_size = 11
-corner_template = np.zeros((240,temp_size))
-corner_template[30:240,1:20] = 1
-blur_square = np.array(255*cv2.GaussianBlur(corner_template, (kernsize, kernsize),0), dtype=np.uint8)
+corner_template = np.zeros((120,temp_size))
+corner_template[:,1:15] = 1
 
-erode_kernel = np.ones((5,5), np.uint8)
-dilate_kernel = np.ones((5,5), np.uint8)
+left_template = np.array(255*cv2.GaussianBlur(corner_template, (kernsize, kernsize),0), dtype=np.uint8)
+right_template = cv2.flip(left_template, 1)
+
+#cv2.imshow("WTF", left_template)
 
 cX_left, cY_left = [0, 0]
 cX_right, cY_right = [0, 0]
 
+navflow_left = np.zeros((480,640))
+navflow_right = np.zeros((480,640))
 
 def turnOffMotors():
     myMotor1.run(Adafruit_MotorHAT.RELEASE)
@@ -59,67 +89,91 @@ def turnOffMotors():
 
 atexit.register(turnOffMotors)    
 
-def findBlockEdge(block_image, location, prev_image):
-    global cX_left, cY_left, cX_right, cY_right
-    global found_block_flag
+def create_masked_im(nav_frame, l_bound, u_bound):
+    nav_image = NavImage(nav_frame) 
+    nav_image.convertHsv()     
+    nav_image.hsvMask(l_bound, u_bound)
+    return(nav_image.frame)
+    # additional operations: probably don't need
+    #nav_image.erodeMask(erode_kernel, 1) 
+    #nav_image.dilateMask(dilate_kernel, 1)
+    #blur_im = np.array(cv2.GaussianBlur(nav_image.frame, (temp_blur_size, temp_blur_size), 0), dtype=np.uint8)
 
-    prelim_flow = np.zeros((480,640), np.float)
-    hsv_now = cv2.cvtColor(block_image, cv2.COLOR_BGR2HSV)
-    hsv_prev = cv2.cvtColor(prev_image, cv2.COLOR_BGR2HSV)
+    #return blur_im
+    
+    
+def find_contours(full_image):
+    dist_transform = cv2.distanceTransform(full_image, cv2.DIST_L2,5)
 
-    bchan_l, gchan_l, rchan_l = cv2.split(block_image)
-    bchan_p, gchan_p, rchan_p = cv2.split(prev_image)
-    rchan_flow = np.around((bchan_l.astype(np.float) - bchan_p.astype(np.float))/255)
+    _, region_of_interest = cv2.threshold(dist_transform, 0.12*dist_transform.max(),255,0)
+    roi = np.uint8(region_of_interest)
+    #cv2.imshow("Slow catchup", roi)
+    _, contours, heirarchy = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    cXList = []
+    cYList = []
+    for cntr in contours:
+        if cv2.contourArea(cntr) > 1100:
+            # get centroid of each contour
+            mments = cv2.moments(cntr)
+            cX = int(mments['m10']/mments['m00'])
+            cY = int(mments['m01']/mments['m00'])    
+            cXList.append(cX)
+            cYList.append(cY)
+            
+    print("Found centroids: (x-loc) ", cXList)
     
-    inv_flow = (bchan_p.astype(np.float) - bchan_l.astype(np.float))/255
-    #cv2.imshow("reverse flow", inv_flow)
-    #cv2.imshow("fwd flow", rchan_flow)
-    # need to calculate forward or reverse flow depending on what direction
-    # we are travelling
     
-    # Convert image to HSV space and threshold
-    #hsv = cv2.cvtColor(block_image, cv2.COLOR_BGR2HSV)
+def find_edge(nav_frame, l_bound, u_bound, cam_flag, location):
+    global navflow_left, navflow_right
+    global cX_left, cY_left
+    global cX_right, cY_right
     
-    if location == 'left':
-        lower_blue = np.array([110, 0, 20])
-        upper_blue = np.array([150, 100, 255])
-        block_locate = cv2.inRange(hsv_now, lower_blue, upper_blue)  
-        nav_prev = cv2.inRange(hsv_prev, lower_blue, upper_blue)
-        nav_all = block_locate+nav_prev  
-        #block_locate = cv2.flip(cv2.transpose(blue_mask),0)
+    nav_image = NavImage(nav_frame) 
+    nav_image.convertHsv()     
+    nav_image.hsvMask(l_bound, u_bound)
+    
+    
+    # additional operations: probably don't need
+    nav_image.erodeMask(erode_kernel, 1) 
+    nav_image.dilateMask(dilate_kernel, 1)
+    blur_im = np.array(cv2.GaussianBlur(nav_image.frame, (temp_blur_size, temp_blur_size), 0), dtype=np.uint8)
 
-    else:
-        lower_blue = np.array([35, 0, 50])
-        upper_blue = np.array([110, 255, 255])
-        block_detect = cv2.inRange(hsv, lower_blue, upper_blue)
-        block_locate = cv2.dilate(block_detect, dilate_kernel, iterations=1)
+    mments = cv2.moments(blur_im)
+    if (mments['m00'] > 0):
+        cX = int(mments['m10']/mments['m00'])
+        cY = int(mments['m01']/mments['m00'])
+        if cam_flag:
+            cX_left = cX#max_loc[0]+temp_size//2 #half template size
+            cY_left = cY#max_loc[1]
+            #cv2.imshow("Left filter", blur_im)
+            print("cX_left, ", cX_left)
+            
+        else:
+            cX_right = cX#max_loc[0]+temp_size//2 #half template size
+            cY_right = cY#max_loc[1]
+            #print("cX_right, " , cX_right)
+    
+    #if cam_flag: #(direction == 'left'):
+    #    template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), left_template, cv2.TM_CCORR_NORMED)
+    #    navflow_left = blur_im
         
-    block_blurred = cv2.GaussianBlur(block_locate, (11,11),0)
-
-    conv_idx = np.where(block_blurred>0)
+    #else:
+    #    template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), right_template, cv2.TM_CCORR_NORMED)
+    #    navflow_right = blur_im
     
-    prelim_flow[conv_idx] = rchan_flow[conv_idx]
-    
-    cv2.imshow("blue mask", prelim_flow)
-        
-    # Which is faster: template matching or edge detection?
-
-
-    # use template as matched filter
-    block_u8 = np.array(prelim_flow, dtype=np.uint8)
-    template_match = cv2.matchTemplate(block_u8, blur_square, cv2.TM_CCORR_NORMED)
-
     # Location
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(template_match)
+    #min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(template_match)
     # only update if we're moderately certain about the edge
+    #if not cam_flag:
+    #    print(max_val)
+        
+    #if max_val > 0.66:
+    #    found_block_flag = 1
+    
 
-    if max_val > 0.8:
-        found_block_flag = 1
-        cX_left = max_loc[0]+temp_size//2 #half template size
-        cY_left = max_loc[1]
 
-    else:
-        found_block_flag = 0
+    #else:
+    #    found_block_flag = 0
         
 
 
@@ -134,17 +188,19 @@ myMotor2.setSpeed(des_speed)
 # note: include motor trim values to compensate for any bias (have to test without tethering)
 
 wheel_count = 1
-lower_red_left = np.array([170, 180, 0])
-upper_red_left = np.array([180, 255, 255])
-lower_red_right = np.array([0, 200, 0])
-upper_red_right = np.array([10, 255, 255])
 
 
 left_balance_check = 0
 right_balance_check = 0
 
+# Set navigation thresholds:
+found_edge_threshold = 350
+back_up_threshold = 520
+
+
 #for frame in picam.capture_continuous(rawCapture, format="bgr", use_video_port=True):
 while running:
+
 
     # two problems: slow image processing (can thread)
     # second: how do we tell when to stop?
@@ -176,29 +232,40 @@ while running:
     #try:
     right_frame = webcam.read()
     left_frame = picam.read()
+    
+    
+ 
+    # new plan
+    left_nav = create_masked_im(left_frame, l_blue_left, u_blue_left)
+    right_nav = create_masked_im(right_frame, l_blue_right, u_blue_right)
+    
+    # distance transform
+    full_im = np.concatenate((left_nav, right_nav), axis=1)
+    #threading.Thread(target=find_contours, args=(full_im,)).start()
 
+    cv2.imshow("unwrapped", full_im)
 
-    hsv_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2HSV)
-    hsv_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2HSV)
+    #hsv_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2HSV)
+    #hsv_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2HSV)
 
-        # white balance between cameras is inconsistent so it is unlikely that this will work
-        # but let's try it anyway
+    # white balance between cameras is inconsistent so it is unlikely that this will work
+    # but let's try it anyway
         
-    hue_left, sat_left, val_left = cv2.split(hsv_left)
-    hue_right, sat_right, val_right = cv2.split(hsv_right)
+    #hue_left, sat_left, val_left = cv2.split(hsv_left)
+    #hue_right, sat_right, val_right = cv2.split(hsv_right)
 
     
-    red_mask_left = cv2.inRange(hsv_left, lower_red_left, upper_red_left)
-    red_mask_right = cv2.inRange(hsv_right, lower_red_right, upper_red_right)
+    #red_mask_left = cv2.inRange(hsv_left, lower_red_left, upper_red_left)
+    #red_mask_right = cv2.inRange(hsv_right, lower_red_right, upper_red_right)
 
-    homeID_left = cv2.erode(red_mask_left, erode_kernel, iterations=1)
+    #homeID_left = cv2.erode(red_mask_left, erode_kernel, iterations=1)
 
-    homeID_right = cv2.erode(red_mask_right, erode_kernel, iterations=1)        
+    #homeID_right = cv2.erode(red_mask_right, erode_kernel, iterations=1)        
     
-    left_balance_check = np.sum(np.sum(homeID_left.astype(float), axis=0), axis=0)/500000.0
-    right_balance_check = np.sum(np.sum(homeID_right.astype(float), axis=0), axis=0)/600000.0 - 1.5 # camera tilt bias
+    #left_balance_check = np.sum(np.sum(homeID_left.astype(float), axis=0), axis=0)/500000.0
+    #right_balance_check = np.sum(np.sum(homeID_right.astype(float), axis=0), axis=0)/600000.0 - 1.5 # camera tilt bias
 
-    balance_error = left_balance_check - right_balance_check
+    #balance_error = left_balance_check - right_balance_check
         #print(balance_error)
         #print("homing volume")
         #print(left_balance_check)
@@ -213,7 +280,7 @@ while running:
     #        myMotor2.setSpeed(int(vnew_right))
         
 
-    bchan_l, gchan_l, rchan_l = cv2.split(left_frame)
+    #bchan_l, gchan_l, rchan_l = cv2.split(left_frame)
 
     #Try this
     # 1. apply hsv-mask, index regions of interest
@@ -221,34 +288,25 @@ while running:
     # OR split hsv, normalise H, get flow, then apply mask
 
 
-    if fcount > 1:
+    #if fcount > 1:
 
         #if fcount%2 == 0:
         #    threading.Thread(target=findBlockEdge,args=(right_frame,'right',)).start()
 
-        #else:        
-        threading.Thread(target=findBlockEdge,args=(left_frame,'left', prev_frame,)).start()
-        
-        
+        #else:    
             
-        #optic flow not terribly useful?
-            #differentiate image differences
-            #diff_left = (homeID_left.astype(np.float) - homeIDleft_prev.astype(np.float))/255
-            #diff_right = (homeID_right.astype(np.float) - homeIDright_prev.astype(np.float))/255
-            #left_flow_check = np.sum(np.sum(diff_left.astype(float), axis=0), axis=0)/100
-            #right_flow_check = np.sum(np.sum(diff_right.astype(float), axis=0), axis=0)/100
-            #print(left_flow_check)
-            #print(right_flow_check)
-            #cv2.imshow("Left optic flow", diff_left)
-            #cv2.imshow("Right optic flow", diff_right)
+        #threading.Thread(target=find_edge,args=(left_frame,  l_blue_left, u_blue_left,  1, 640-found_edge_threshold,)).start()
+        #threading.Thread(target=find_edge,args=(right_frame, l_blue_right, u_blue_right, 0, found_edge_threshold,)).start()
+              
+            
+      
+    #cv2.circle(left_frame, (cX_left,cY_left), 7, (255,0,0), -1)
+    #cv2.imshow("Left Camera", left_frame)
+    #cv2.imshow("Left Camera", navflow_left)
 
-
-
-    cv2.circle(left_frame, (cX_left,cY_left), 7, (255,0,0), -1)
-    cv2.imshow("Left Camera", left_frame)
-
-    #cv2.circle(right_frame, (cX_right,cY_rig  ht), 7, (255,0,0), -1)
-    cv2.imshow("Right Camera",  right_frame)
+    #cv2.circle(right_frame, (cX_right,cY_right), 7, (255,0,0), -1)
+    #cv2.imshow("Right Camera",  right_frame)
+    #cv2.imshow("Right Camera", navflow_right)
         
     
     #bchan_l_prev = bchan_l
