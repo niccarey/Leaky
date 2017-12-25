@@ -12,7 +12,7 @@ print(a5.read())
 
 try:
     while True:
-        v = 1.0-a5.read()
+        v = 1.0 - a5.read()
         print(v)
         time.sleep(0.5)
 

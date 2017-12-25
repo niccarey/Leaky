@@ -8,8 +8,7 @@ import random
 class LeakyBot(object):
     # each leaky bot should have two motors, left and right, 
     # and a standard set of states and transitions
-    # Conditions may be unecessary and slowing things down
-    
+ 
     states = ['waiting', 'turning', 'sensing', 'driving', 'deposit', 'backup', 'go_home']
     
     transitions = [ {'trigger':'button_push', 'source':'waiting', 'dest':'turning'},
@@ -18,23 +17,23 @@ class LeakyBot(object):
         {'trigger':'humidity_maintained', 'source': 'sensing', 'dest':'driving', 'conditions':'do_high_humidity'},
         {'trigger':'stop_driving', 'source':'driving', 'dest':'sensing'},
         {'trigger':'low_humidity', 'source':'sensing', 'dest':'turning', 'prepare':'set_turn_status'},
-        {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'prepare':'set_deposit_direction', 'conditions':'do_have_block', 'unless':'do_high_humidity'},
+        {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'conditions':'do_have_block', 'unless':'do_high_humidity'},
         {'trigger':'reached_wall', 'source':'deposit', 'dest':'backup'},
         {'trigger':'home_spotted', 'source':'backup', 'dest':'go_home', 'unless':'do_have_block'},
         {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'},
-        {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'} ]
+        {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'},
+        {'trigger': 'static_visuals', 'source': 'driving', 'dest': 'backup'},
+        {'trigger': 'static_visuals', 'source': 'turning', 'dest':'backup'}]
         
         
     start_turning_frame = 0
     
-    # won't need this once humidity sensing is added
-    sensor_loop = 0
-    sensor_loop_max = 4
     
     def __init__(self, motor_left, motor_right):
         # uniform initialization functions
         self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting')
-        self.direction = 'left' # not sure if I want this now
+        self.direction = 'left' 
+        self.similarity = 0
         
         # attach motors to object
         self.motor_left = motor_left
@@ -45,30 +44,26 @@ class LeakyBot(object):
         self.sensing_clock = 0
         
         self.cam_flag = 1
-        self.threshold_state = 'leq'
         self.speed = 0
         self.high_humidity = True
         self.have_block = False
-        
-    
+            
     def do_have_block(self):
         return(self.have_block)
         
     def do_high_humidity(self):
         return(self.high_humidity)
+
         
     def on_enter_turning(self):
         print(self.state)
-        des_speed = self.speed
-        self.set_motor_values(des_speed, des_speed)
                 
         
     def on_exit_turning(self):
         # Pause briefly before transition
         self.set_motor_values(0,0)
         time.sleep(2)
-        
-        
+                
     def on_enter_driving(self):
         print(self.state)
         self.direction = 'fwd' 
@@ -87,35 +82,36 @@ class LeakyBot(object):
         self.sensor_loop += 1
                 
     
+    # no need for this?
     def set_loop(self):
         self.sensor_loop = 0
         
-        
-    def set_deposit_direction(self):
-        if self.cam_flag: 
-            self.threshold_state = 'leq'
-                            
-        else:
-            self.threshold_state = 'geq'
-
 
     def set_turn_status(self):
         turn_dir = bool(random.getrandbits(1))
-
+        self.direction = 'revturn'
         if turn_dir:
-            self.direction = 'left'
             self.cam_flag = 1
-            self.threshold_state = 'geq'
-
         else:
-            self.direction = 'right'
             self.cam_flag = 0
-            self.threshold_state = 'leq'
             
-        print("Turning to deposit: ", self.cam_flag)        
+        print("Turning direction: ", self.cam_flag)
         self.set_motor_values(0,0)
         time.sleep(2)
         
+    
+    def generic_left_turn(self):
+        self.direction = 'left'
+        self.set_motor_values(self.speed, self.speed)
+        time.sleep(0.6)
+        self.set_motor_values(0,0)
+        
+    def generic_right_turn(self):
+        self.direction = 'right'                
+        self.set_motor_values(self.speed, self.speed)
+        time.sleep(0.6)
+        self.set_motor_values(0,0)
+    
     
     def on_enter_waiting(self):
         print(self.state)
@@ -134,29 +130,28 @@ class LeakyBot(object):
         
         else:
             self.direction = 'right'
+
         
     def on_enter_deposit(self):
         print(self.state)
         self.direction = 'fwd' 
-        des_speed = self.speed
-        self.set_motor_values(des_speed, des_speed)
         
     def on_exit_deposit(self):
-        self.have_block = False 
+        self.have_block = False
 
         self.set_motor_values(0,0)
-        time.sleep(2)
+        time.sleep(1.5)
             
         
     def on_enter_backup(self):
         print(self.state)
         self.direction = 'rev'
+        self.set_motor_values(self.speed, self.speed)
+        time.sleep(0.8)
         # different to a normal turn, so:
-        if self.cam_flag:
-            self.set_motor_values(self.speed, 0)
-            
-        else:
-            self.set_motor_values(0, self.speed)
+
+        self.direction = 'revturn'
+        self.set_motor_values(0,0)
 
             
     def on_exit_backup(self):
@@ -165,11 +160,8 @@ class LeakyBot(object):
         
   
     def on_enter_go_home(self):
-        print(self.state)
-        self.direction = 'fwd'
-        self.high_humidity = True
-        des_speed = self.speed
-        self.set_motor_values(des_speed, des_speed)
+        print("Now entering:" , self.state)
+        self.high_humidity = True # probably not necessary but anyway
 
   
     def set_motor_values(self, left_speed, right_speed):
@@ -177,17 +169,33 @@ class LeakyBot(object):
         mr = self.motor_right
         check_dir = self.direction
         
+        #ml.setSpeed(int(float(left_speed)*1.2))
         ml.setSpeed(left_speed)
         mr.setSpeed(right_speed)
 
         if (left_speed == 0) and (right_speed == 0):
             ml.run(Adafruit_MotorHAT.RELEASE)
             mr.run(Adafruit_MotorHAT.RELEASE)
+
+        elif check_dir == 'fwd':
+            print("forward check")
+            ml.run(Adafruit_MotorHAT.FORWARD)
+            mr.run(Adafruit_MotorHAT.FORWARD)
         
         elif check_dir == 'rev':
             ml.run(Adafruit_MotorHAT.BACKWARD)
             mr.run(Adafruit_MotorHAT.BACKWARD)
         
+        elif check_dir == 'revturn':
+           if self.cam_flag:
+               ml.setSpeed(int(float(right_speed)*0.6))
+
+           else:
+               mr.setSpeed(int(float(right_speed)*0.6))
+
+           ml.run(Adafruit_MotorHAT.BACKWARD)
+           mr.run(Adafruit_MotorHAT.BACKWARD)
+
         elif check_dir == 'left':
             ml.run(Adafruit_MotorHAT.BACKWARD)
             mr.run(Adafruit_MotorHAT.FORWARD)
@@ -204,6 +212,7 @@ class LeakyBot(object):
             
         
     def have_block(self):
+        print(self.have_block)
         return self.have_block
         
     def high_humidity(self):
