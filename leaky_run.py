@@ -19,12 +19,11 @@ import cv2
 import os
 
 import numpy as np
-from PIL import Image
 import threading 
 import curses
 
 from LeakyBot import LeakyBot
-from leaky_nav_functions import *
+
 
 # initialisation: any global variables, etc 
 
@@ -35,10 +34,11 @@ myMotor1 = mh.getMotor(1)
 myMotor2 = mh.getMotor(3)
 print("...done")
 
+
 print("Initialising cameras ...")
 # Camera initialization
-#webcam = VideoStream(src=0).start()
-picam = VideoStream(usePiCamera=True, resolution=(1648,1232)).start()
+webcam = VideoStream(src=0).start()
+picam = VideoStream(usePiCamera=True, resolution=(640,480)).start()
 
 time.sleep(0.1)
 print("...done")
@@ -56,33 +56,33 @@ print("Setting up filtering constants")
 erode_kernel = np.ones((5,5), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
 
-# Define omnicam masks:
-cp = [ 389, 297]
-r_out = 290;
-r_inner = 145;
-r_norim = 260;
+l_red_left = np.array([170, 180, 0])
+u_red_left = np.array([180, 255, 255])
+l_red_right = np.array([0, 200, 0])
+u_red_right = np.array([10, 255, 255])
 
-poly_front = np.array([cp, [20, 1], [620,1]])
-poly_back = np.array([cp, [1, 600], [800,600], [800,420]])
-poly_left = np.array([cp, [180, 1], [1, 1],[1, 600]])
-poly_right = np.array([cp, [620, 1], [800 ,1], [800, 420]])
+l_blue_left = np.array([110, 0, 20])
+u_blue_left = np.array([150, 100, 255])
+l_blue_right = np.array([100, 0, 0])
+u_blue_right = np.array([150, 100, 255])
 
-sides_mask, front_mask, wide_mask = define_masks(cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
+# Matched filtering:
+kernsize = 17
+temp_size = 30
+temp_blur_size = 11
+corner_template = np.zeros((240,temp_size))
+corner_template[:,1:15] = 1
 
-lg_bound = 50
-ug_bound = 110
+left_template = np.array(255*cv2.GaussianBlur(corner_template, (kernsize, kernsize),0), dtype=np.uint8)
+right_template = cv2.flip(left_template, 1)
 
-l_green = np.array([40, 60, 0])
-u_green = np.array([90, 255, 255])
-l_red = np.array([150, 100, 30])
-u_red = np.array([180, 255, 255])
-omni_frame = np.zeros((600,800,3))
 
 # shuts down motors and cameras on program exit, cleans up terminal
 def shutdownLeaky():
     myMotor1.run(Adafruit_MotorHAT.RELEASE)
     myMotor2.run(Adafruit_MotorHAT.RELEASE)
 
+    webcam.stop()
     picam.stop()
     cv2.destroyAllWindows()
     curses.endwin()
@@ -90,39 +90,162 @@ def shutdownLeaky():
 
 atexit.register(shutdownLeaky)
 
-def update_similarity(robot, diff):
-    if diff < 80:
-        robot.similarity += 1
-    else:
-        robot.similarity = 0
+print("Establishing global variables")
 
-    return robot
+# Image filters
+deposit_edge = False
+backup_edge = False
 
-def main():
+cX = 0
+cY = 0
 
-#    stdscr.nodelay(1)
-#    curses.cbreak()
-#    curses.noecho()
+blue_walls_match = 50
+home_match = 50
+left_home = 0
+right_home = 0
+blue_left_wall = 0
+blue_right_wall = 0
+
+def balance_detection(left_frame, right_frame, lb_left, lb_right, ub_left, ub_right, lscale, rscale, l_offset, r_offset):
+    leftIm = NavImage(left_frame)
+    rightIm = NavImage(right_frame)
     
-#    stdscr.addstr("Leaky started \n")
-    print("Leaky started ")
+    leftIm.convertHsv()
+    rightIm.convertHsv()
+    
+    
+    leftIm.hsvMask(lb_left, ub_left)
+    rightIm.hsvMask(lb_right, ub_right)
+    
+    leftIm.erodeMask(erode_kernel, 1)
+    rightIm.erodeMask(erode_kernel,1)
+    rightIm.dilateMask(dilate_kernel, 1)
+    
+    left_weight = leftIm.maskWeight(lscale, l_offset)
+    right_weight = rightIm.maskWeight(rscale, r_offset)
+    
+    weight_diff = left_weight - right_weight
+    
+    return (weight_diff, left_weight, right_weight)
+
+
+def find_edge(nav_frame, l_bound, u_bound, thresh_state, cam_flag, location):
+    global cX, cY
+    
+    nav_image = NavImage(nav_frame) 
+    nav_image.convertHsv()     
+    nav_image.hsvMask(l_bound, u_bound)
+    
+    
+    # additional operations: probably don't need
+    nav_image.erodeMask(erode_kernel, 1) 
+    nav_image.dilateMask(dilate_kernel, 1)
+    blur_im = np.array(cv2.GaussianBlur(nav_image.frame, (temp_blur_size, temp_blur_size), 0), dtype=np.uint8)
+
+    
+    if cam_flag: #(direction == 'left'):
+        template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), left_template, cv2.TM_CCORR_NORMED)
+        
+    else:
+        template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), right_template, cv2.TM_CCORR_NORMED)
+        #cv2.imshow("WTF", blur_im)
+    
+    # Locate best template match
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(template_match)
+    print max_val
+
+    if (max_val > 0.7) and (max_loc[0]>2):
+        # we are fairly sure we have found a good match
+        # get true edge location
+        cX = max_loc[0]+temp_size//2 
+        cY = max_loc[1] 
+        #print(cX)
+        
+        if thresh_state == 'leq' and (max_loc[0] + temp_size//2 < location):
+            #print("Passed threshold. leq")
+            return True
+        
+        elif thresh_state == 'geq' and (max_loc[0] + temp_size//2 > location):
+            #print("Passed threshold, geq")
+            return True  
+            
+        else:
+            return False
+    
+    elif np.count_nonzero(blur_im) > 200000: # most of the screen is block
+        print("uhoh, too close!")
+        return True
+        
+    else:
+        return False    
+
+    
+def lpfilter(input_buffer):
+    # check length
+    if len(input_buffer) < 3:
+        return 0
+    
+    else:
+        output = 0.6*input_buffer.pop() + 0.2*input_buffer.pop() + 0.2*input_buffer.pop()
+        return output
+
+
+# Should'nt need this now
+def check_edges(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, found_edge_threshold, back_up_threshold):
+    global deposit_edge
+    global backup_edge
+    
+    deposit_edge = find_edge(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, found_edge_threshold)
+    backup_edge = find_edge(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, back_up_threshold)
+    if deposit_edge:
+        print("deposit: TRUE")
+        
+    if backup_edge:
+        print("Backup: TRUE")
+
+
+def check_balance(lframe, rframe, ll_bound, ul_bound, lr_bound, ur_bound, left_scale, right_scale, left_offset, right_offset, wall_flag): #ubl, ubr, bl_scale, br_scale, lb_offset, rb_offset, lrl, lrr, url, urr, rl_scale, rr_scale, lr_offset, rr_offset):
+    global blue_walls_match
+    global home_match
+    
+    global left_home, right_home
+    global blue_left_wall, blue_right_wall
+    
+    if wall_flag: 
+        blue_walls_match, blue_left_wall, blue_right_wall = balance_detection(lframe, rframe, ll_bound, lr_bound, ul_bound, ur_bound, left_scale, right_scale, left_offset, right_offset)
+        
+    else: 
+        home_match, left_home, right_home  = balance_detection(lframe, rframe, ll_bound, lr_bound, ul_bound, ur_bound, left_scale, right_scale, left_offset, right_offset)
+    
+    
+
+def main(stdscr):
+    
+    stdscr.nodelay(1)
+    curses.cbreak()
+    curses.noecho()
+    
+    stdscr.addstr("Leaky started \n")
     
     global deposit_edge
     global backup_edge
-    global cX, cY
     
-    # Initialise cameras - hold auto white balance constant to improve filtering
-    #stdscr.addstr("Setting camera gains and white balance \n")
-    print("Setting camera gains and white balance ")
+	# Initialise cameras - hold auto white balance constant to improve filtering
+    stdscr.addstr("Setting camera gains and white balance \n")
     camgain = (1.4,2.1)
     picam.camera.awb_mode = 'off'
     picam.camera.awb_gains = camgain
 
+    os.system('v4l2-ctl --set-ctrl=white_balance_temperature_auto=0')
+    os.system('v4l2-ctl --set-ctrl=white_balance_temperature=2800')
+    os.system('v4l2-ctl --set-ctrl=exposure_auto=1')
+    os.system('v4l2-ctl --set-ctrl=exposure_absolute=200')
+    os.system('v4l2-ctl --set-ctrl=brightness=0')    
+    
     # Set Arduino pressure sensor pin
     block_pin = board.get_pin('a:5:i')
     
-    #stdscr.addstr("Establishing humidity sensing GPIO settings \n")
-    print("Establishing humidity sensing GPIO settings ")
+    stdscr.addstr("Establishing humidity sensing GPIO settings \n")
     # Set up humidity sensing
     gp.setwarnings(False)
     gp.setmode(gp.BCM)
@@ -144,255 +267,198 @@ def main():
 
     sens_array = [sens1, sens2, sens3]
     
-    hum_threshold = 78
+    hum_threshold = 65
     
     # Set up motors
-    #stdscr.addstr("Setting motor parameters \n")
-    print("Setting motor parameters")
+    stdscr.addstr("Setting motor parameters \n")
     leaky1 = LeakyBot(myMotor1, myMotor2)    
-    leaky1.speed = 200
+    leaky1.speed = 140
     leaky1.direction = 'fwd'
     
-    #stdscr.addstr("Setting navigation parameters \n")
-    print("Setting navigation parameters")
-    # take a snapshot, make an adaptive estimate of colour filter
-    init_frame = picam.read()
-    init_crop = init_frame[196:796, 432:1232,:]
-    # update boundary functions (assumes we have some blocks visible)
-    l_green, u_green = boundary_estimate(init_crop, lg_bound, ug_bound)
+    stdscr.addstr("Setting navigation parameters \n")
+    # Set navigation thresholds:
+    found_edge_threshold = 350
+    back_up_threshold = 550
+    leaky1.threshold_state = 'leq'
+    
+    start_turning_frame = 0
     
     running = True
     
     fcount = 1
-    kill_count = 1
-    prepare_wait_flag = 0
-
+    # to-do: improve motor control setup
+    
     winset = 0
     
-    #stdscr.addstr("Waiting for block ... \n")
-    print("Waiting for block ...")
+    stdscr.addstr("Waiting for block ... \n")
 
-    while running:    
+    home_drive_flag = 0
+    
+    while running:
         # STATE CHECK
         #print("State check", leaky1.direction, leaky1.cam_flag, leaky1.threshold_state, leaky1.state)
         
         # if we have windows open, use waitkey
+        if winset:
+            key = cv2.waitKey(1) & 0xFF
+        else:
+            key = stdscr.getch()
         
-        # check for button pushes
+        # CHECK FOR BUTTON PUSHES
         if leaky1.is_waiting() or leaky1.is_deposit():
-            try:                
-                block_trigger = 1.0 -  block_pin.read()
-                time.sleep(0.3)
-                if block_trigger > 0.02:
-                    #stdscr.addstr(str(block_trigger))
-                    #stdscr.addstr(" \n")
-                    print("Triggered, " , block_trigger)
+            try:
+                block_trigger = 1.0 - block_pin.read()
+                if block_trigger > 0.05:
+                    stdscr.addstr(str(block_trigger))
+                    stdscr.addstr(" \n")
                     leaky1.button_push()
                 
             except Exception as e:
-                print("Problem reading board, retry ...")
-                #stdscr.addstr("problem reading board, retry ... \n")
-                print(e)    
-        
-        # get camera frames
-        full_frame = picam.read()
-        omni_frame = full_frame[196:796, 432:1232,:]
-        save_frame = omni_frame.copy()
-        
-        #else:
-            #key = stdscr.getch()
-
-        try: prev_frame
-        
-        except NameError: print("...") #no frame yet
-        else: diff_val = sim_mse(save_frame, prev_frame)
-
-        if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
-            #stdscr.addstr("moving, no sensors \n")
-            print("moving, no sensors")
-            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
-            time.sleep(0.14)
-
-            # Start sensing subloop
-            leaky1.set_motor_values(0,0)
-            #stdscr.addstr("Entering sensor loop \n")
-            print("Entering sensor loop")
-            start_time = time.time()
-
-            if (leaky1.is_turning()):
-
-                # alternates directions to a) avoid dripper jam and b) hopefully keep block in place
-                if leaky1.direction == 'turn':
-                    leaky1.direction = 'revturn'
-                elif leaky1.direction == 'revturn':
-                    leaky1.direction = 'turn'
-
-                # we are either a) looking for wall balancing or b)looking to deposit
-                if leaky1.high_humidity:
-                    print("Balancing walls: ")
-                    heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
-                    rednum, red_head, _ , _ = omni_home(cp, omni_frame, sides_mask, l_red, u_red)
-                    print(heading_angle)
-
-                    if rednum > 0:
-                        if red_head < 0:
-                            leaky1.cam_flag = 1
-
-                        else:
-                            leaky1.cam_flag = 0
-
-                    elif (heading_angle > 2.9) or (heading_angle < -2.9) :
-                        print('walls balanced!')
-                        leaky1.walls_balanced()
-
-                    elif heading_angle > 0:
-                        leaky1.cam_flag = 1
-                        print("I think I'm turning left")
-        
-                    elif heading_angle < 0:
-                        leaky1.cam_flag = 0
-                        print("I think I'm turning right")
-
-                    else: print('no walls in view')
-                    
-                    #img = Image.fromarray(show_frame)
-                    #imname = './TestIm/BalanceOutput_'
-                    #imname += str(fcount)
-                    #imname += '.png'
-                    #img.save(imname)
-                
-                else: # we must be looking for a deposition spot
-                    heading_angle, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green)
-                    rednum, _, _ , _ = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
-                    print('Looking for deposition, angle: ', heading_angle)
-                    if ((heading_angle > 2.3) or (heading_angle < -2.3)) and rednum > 0:
-                        leaky1.similarity = 0
-                        leaky1.wall_found()
-
-                    leaky1 = update_similarity(leaky1, diff_val)
-
-                    if leaky1.similarity > 8:
-                        leaky1.static_visuals()
-                        leaky1.similarity = 0
-
-                #img = Image.fromarray(show_frame)
-                #imname = './TestIm/TurnForDepOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
-
-            elif leaky1.is_deposit():
-                leaky1 = update_similarity(leaky1, diff_val)
-                #print kill_count
-
-                if (leaky1.similarity > 3) or ((kill_count > 30) and (diff_val<150)): 
-                    kill_count = 0
-                    leaky1.reached_wall()
-                    leaky1.similarity = 0
-
-                heading_angle, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green)
-
-                if (heading_angle > 2.6) or (heading_angle < -2.6):
-                    leaky1.direction = 'fwd'
-                    print("Heading straight there: ",  heading_angle*180/np.pi)
-
-                else: # alternate directions when turning during deposition
-                    if leaky1.direction == 'revturn':
-                        leaky1.direction = 'turn'
-                    else: 
-                        leaky1.direction = 'revturn'
-
-                    if heading_angle < 0:
-                        leaky1.cam_flag = 0
-                    elif heading_angle > 0:
-                        leaky1.cam_flag = 1
-                
-    
-                kill_count += 1
-
-                #img = Image.fromarray(show_frame)
-                #imname = './TestIm/DepOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
-
-            elif (leaky1.is_backup() or leaky1.is_go_home()):
-                
-                # look for red walls
-                red_locs, heading_angle, red_sizes, show_frame = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
-
-                print("Balancing red markers", red_sizes)
-                if leaky1.is_backup():
-					# is there a way to update the red filter? probably not
-                    print("Markers seen: ", red_locs)
-                    if (red_locs < 2):
-                        print('home not found')
-                        leaky1.direction='revturn'
-                    
-                    else:
-                        leaky1.have_block = False
-                        kill_count = 0 # failsafe                        
-                        leaky1.home_spotted()
-
-                elif leaky1.is_go_home():
-                    if prepare_wait_flag:
-                        if red_locs < 1:
-                            prepare_wait_flag = 0
-                            leaky1.close_to_home()
-                        else:
-                            if leaky1.cam_flag:
-                                leaky1.generic_right_turn()
-                            else:
-                                leaky1.generic_left_turn()
+                stdscr.addstr("problem reading board, retry ... \n")
+                print(e) # output to main terminal so we can see on exit
                             
-                            prepare_wait_flag = 0
-                            leaky1.close_to_home()
+        
+        # FILTER CAMERA FRAMES
+        right_frame = webcam.read()
+        left_frame = picam.read()
+        
+        # If we are  - turning, backing up, depositing (ie doing anything that involves looking)
+        # set wheel values
+        # sleep for (0.1) or whatever
+        # set wheel values to zero while we sense
+        # while time < sense_time
+        #    check wall balancing values
+        #    check edge values
+        #    trigger any requisite state changes
+            
 
-                    elif red_locs < 1:
-                        leaky1.direction='turn'
-                        leaky1.cam_flag = 1
+        #if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
+            # figure out motor values
+            # set motor values
+        #    time.sleep(0.1)
+        #    start_time = time.time()
+            # set motor values to zero
+        #    while (time.time() - start_time < sense_delay):
+        #        if (leaky1.is_turning()):
+                    
+                # check blue wall balancing (don't thread)
+                # OR
+                # check red wall balancing
+                # OR
+                # do edge finding 
+                
+                # handle whatever has been trigered, depending on state
+                # loop a few times in case the vision is lagging
+                # now fall through
 
-                    elif max(red_sizes) > 3000:
-                        print("Preparing for new block")
-                        prepare_wait_flag = 1
-                        leaky1.cam_flag = bool(random.getrandbits(1))
+        # check for wall balancing (thread this so it interrupts)
+        if (leaky1.is_turning()):
+            leaky1.set_motor_values(0,0)
+            balancetime = time.time()
 
-                    elif (heading_angle > 2.3) or (heading_angle < -2.3):
-                        print("Going fwd ...")
-                        leaky1.direction='fwd'
+            while (time.time() - balancetime) < 0.3 :
+	        blue_thread = threading.Thread(target=check_balance, args=(left_frame, right_frame, l_blue_left, u_blue_left, l_blue_right, u_blue_right, 550000.0, 550000.0, 0.0, 5.0, 1, )).start()                
 
-                    else: 
-                        if leaky1.direction == 'turn':
-                            leaky1.direction = 'revturn'
-                        else:
-                            leaky1.direction = 'turn'
+            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
+            time.sleep(0.1)
+            
+        elif (leaky1.is_backup() or leaky1.is_go_home()) and not home_drive_flag:
+            balancetime =time.time()
+            while (time.time() - balancetime) < 0.3 :
+	        red_thread = threading.Thread(target=check_balance, args=(left_frame, right_frame, l_red_left, u_red_left, l_red_right, u_red_right, 500000.0, 600000.0, 0.0, 1.5, 0, )).start()
 
-                        if heading_angle > 0:
-                            leaky1.cam_flag = 1
+            home_drive_flag = 1
 
-                        else:
-                            leaky1.cam_flag = 0
 
-                    print("Heading angle: ", heading_angle*180/np.pi)
-    
-
-                #img = Image.fromarray(show_frame)
-                #imname = './TestIm/HomeOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
+        if leaky1.is_turning():
+            if blue_left_wall > 5: 
+	        if (np.abs(blue_walls_match) < 2) or (np.abs(np.sign(blue_walls_match) + np.sign(blue_wm_prev))< 0.5):
+        	    leaky1.walls_balanced()
+                    # ensures each cycle starts with no edge found flag
+                    deposit_edge = False
+                    backup_edge = False
 
         if winset:
-            cv2.imshow("Camera view", show_frame)
-            key = cv2.waitKey(1) & 0xFF
+            cv2.imshow("Left camera", left_frame)
+            cv2.imshow("Right camera", right_frame)
+                                                
+        blue_wm_prev = blue_walls_match
+        
+        if deposit_edge and leaky1.is_turning():
+            leaky1.wall_found()
+            backup_edge = False
+            
+        elif leaky1.start_turning_frame and (leaky1.is_turning() or leaky1.is_deposit()):
+            # toggle turns on and off to let visual sensors catch up
+            # manually hacking the background update cycle
+            leaky1.set_motor_values(0,0)
+            if leaky1.cam_flag:
+                deposit_edge = find_edge(left_frame,  l_blue_left, u_blue_left, leaky1.threshold_state, leaky1.cam_flag, 640-found_edge_threshold)
+                backup_edge = find_edge(left_frame,  l_blue_left, u_blue_left, leaky1.threshold_state, leaky1.cam_flag, 640-back_up_threshold)
+                cv2.circle(left_frame, (cX,cY), 7, (255,0,0), -1)
+        
+            else:
+                deposit_edge = find_edge(right_frame, l_blue_right, u_blue_right, leaky1.threshold_state, leaky1.cam_flag, found_edge_threshold)
+                backup_edge = find_edge(right_frame,  l_blue_right, u_blue_right, leaky1.threshold_state, leaky1.cam_flag, back_up_threshold)
+                cv2.circle(right_frame, (cX,cY), 7, (255,0,0), -1)
                 
+            if ccount > 5:
+                leaky1.start_turning_frame = 0
 
-                        
+            ccount += 1
+        
+        
+        elif leaky1.is_turning() and not leaky1.high_humidity: 
+            leaky1.start_turning_frame = 1
+            ccount = 0                
+            leaky1.on_enter_turning()
+            time.sleep(0.1)
+            
+        elif leaky1.is_deposit():
+            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
+            ccount += 1
+            leaky1.start_turning_frame=1
+            time.sleep(0.1)
+            # quick hack
+            if ccount > 5:
+                backup_edge = True
+        
+        # hopefully that's all our turning code
+        if backup_edge and leaky1.is_deposit():
+            leaky1.reached_wall()
+            deposit_edge = False
+            backup_edge = False
+        
+        if (np.abs(home_match) < 1.5) and leaky1.is_backup() and (left_home > 2):
+            leaky1.home_spotted()
+            
+        elif leaky1.is_go_home():            
+            if (left_home > 25) or (right_home > 25):
+                stdscr.addstr("I'm home! Waiting ... \n")
+                leaky1.close_to_home()
+                    
+            elif home_drive_flag:
+                left_speed = leaky1.speed - 2*home_match
+                right_speed = leaky1.speed + 2*home_match
+                if np.abs(home_match) > 3:
+                    leaky1.set_motor_values(int(left_speed), int(right_speed))
+                else:
+                    leaky1.set_motor_values(leaky1.speed, leaky1.speed)
+
+                time.sleep(0.1)
+                home_drive_flag = 0
+
+            else:
+                leaky1.set_motor_values(0,0)
+
+    
         # CHECK HUMIDITY DATA
         # nB: reading from the humidity sensors is SLOW
         
         if leaky1.is_sensing():
-            if (time.time() - leaky1.sensing_clock < 30):
+            if (time.time() - leaky1.sensing_clock < 10):
+                # Read all sensors - ok here's a question
+                # do I have to read the sensors for them to settle?
                 
                 # TODO: once we are sure humidity bubble is working
                 # try just reading once, at the end of the sensing pause
@@ -411,15 +477,9 @@ def main():
                         print("Sensor problem: ", (hum_count+1))
                         #stdscr.addstr("Sensor problem \n")
 
-                #img = Image.fromarray(save_frame)
-                #imname = './TestIm/SenseOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
                 
             else: # last sensor reading
-                #stdscr.addstr("Entering final sensor read ...\n")
-                print("Entering final sensor read ...")
+                stdscr.addstr("Entering final sensor read ...\n")
                 hum_sum = 0
                 hum_count = 0
                 for sens_i in sens_array:
@@ -432,14 +492,14 @@ def main():
                         
                     except Exception as e:
                         print("Sensor problem: ", (hum_count+1))
-                        #stdscr.addstr("continue ... \n")
-                        print("continuing")
+                        stdscr.addstr("continue ... \n")
 
+                        #print(e) # output to main terminal to catch on exit
                     
                 if hum_count > 0:
                     hum_av = hum_sum/hum_count
                     print("Average humidity: ", int(hum_av))
-                    #stdscr.addstr(" \n")
+                    stdscr.addstr(" \n")
                     
                     if hum_av < hum_threshold:
                         leaky1.high_humidity = False
@@ -450,38 +510,33 @@ def main():
                         leaky1.humidity_maintained()
                 
                 else:
-                    #stdscr.addstr("no sensors available, starting again \n")
-                    print("No sensors available, starting again")
+                    stdscr.addstr("no sensors available, starting again \n")
                     leaky1.sensing_clock = time.time()
 
                 
 
         elif leaky1.is_driving():
-            leaky1 = update_similarity(leaky1, diff_val)
-            if leaky1.similarity > 5:
-                leaky1.static_visuals()
-                leaky1.similarity = 0
-
-            elif (time.time() - leaky1.driving_clock < 0.5):
+            if (time.time() - leaky1.driving_clock < 0.5):
                 time.sleep(0.1)
             
             else:
                 leaky1.stop_driving()
         
-        prev_frame = save_frame
+               
         fcount += 1
         
-        if winset:
-            if key == ord("q"):
-                running=False
-                break
-
-        
+        if key == ord("q"):
+            running=False
+            break
+    
+    
     board.exit()
+    webcam.stop()
     picam.stop()
     shutdownLeaky()
-    
+
+
 
 if __name__ == '__main__':
-    main()
-    
+	curses.wrapper(main)
+
