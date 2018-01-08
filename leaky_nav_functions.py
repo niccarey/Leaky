@@ -59,6 +59,19 @@ def define_masks(cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, 
     return sides_mask, front_mask, wide_mask
 
 
+def boundary_estimate(frame, lg_bound, ug_bound):
+    # convert to HSV
+    hist_frame = NavImage(frame)
+    hist_frame.convertHsv()
+    
+    hist = cv2.calcHist([hist_frame.frame], [0], None, [180], [lg_bound, ug_bound])
+    hist_short = hist[lg_bound:ug_bound]
+    
+    green_peak = lg_bound + np.argmax(hist_short)
+    l_green = np.array([green_peak - 20, 60, 0])
+    u_green = np.array([green_peak + 20, 255, 255])
+    
+    return l_green, u_green
 
 def omni_balance(cp, omni_frame, mask, l_green, u_green):
     # apply mask
@@ -120,6 +133,7 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
     # check how many segments larger than (threshold)
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
     cnts_lg = [c for c in cnts if cv2.contourArea(c)>800]
+
     if len(cnts_lg) > 0:
         rect = cv2.minAreaRect(cnts_lg[0])
         if (rect[2] > -45) and (rect[2] < 45):
@@ -129,7 +143,7 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
             boxratio = rect[1][1]
             boxratio /= rect[1][0]
         print("w/h ratio: ", boxratio, "angle: ", rect[2])
-        if (len(cnts_lg) > 1) or (boxratio < 2.5) :
+        if (len(cnts_lg) > 1) or (boxratio < 2.52) :
             print("Keep turning, can see: ", len(cnts_lg))
             return 0, dep_frame.frame.copy()
         

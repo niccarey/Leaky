@@ -24,7 +24,7 @@ import threading
 import curses
 
 from LeakyBot import LeakyBot
-from leaky_nav_functions import define_masks, omni_balance, omni_deposit, omni_home, sim_mse
+from leaky_nav_functions import *
 
 # initialisation: any global variables, etc 
 
@@ -37,7 +37,7 @@ print("...done")
 
 print("Initialising cameras ...")
 # Camera initialization
-webcam = VideoStream(src=0).start()
+#webcam = VideoStream(src=0).start()
 picam = VideoStream(usePiCamera=True, resolution=(1648,1232)).start()
 
 time.sleep(0.1)
@@ -69,10 +69,13 @@ poly_right = np.array([cp, [620, 1], [800 ,1], [800, 420]])
 
 sides_mask, front_mask, wide_mask = define_masks(cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
 
-l_green = np.array([30, 60, 0])
+lg_bound = 50
+ug_bound = 110
+
+l_green = np.array([40, 60, 0])
 u_green = np.array([90, 255, 255])
-l_red = np.array([0, 100, 30])
-u_red = np.array([7, 255, 255])
+l_red = np.array([150, 100, 30])
+u_red = np.array([180, 255, 255])
 omni_frame = np.zeros((600,800,3))
 
 # shuts down motors and cameras on program exit, cleans up terminal
@@ -141,7 +144,7 @@ def main():
 
     sens_array = [sens1, sens2, sens3]
     
-    hum_threshold = 75
+    hum_threshold = 78
     
     # Set up motors
     #stdscr.addstr("Setting motor parameters \n")
@@ -152,13 +155,16 @@ def main():
     
     #stdscr.addstr("Setting navigation parameters \n")
     print("Setting navigation parameters")
-    #leaky1.threshold_state = 'leq'
-    #start_turning_frame = 0
+    # take a snapshot, make an adaptive estimate of colour filter
+    init_frame = picam.read()
+    init_crop = init_frame[196:796, 432:1232,:]
+    # update boundary functions (assumes we have some blocks visible)
+    l_green, u_green = boundary_estimate(init_crop, lg_bound, ug_bound)
     
     running = True
     
     fcount = 1
-    dcount = 1
+    kill_count = 1
     prepare_wait_flag = 0
 
     winset = 0
@@ -171,12 +177,11 @@ def main():
         #print("State check", leaky1.direction, leaky1.cam_flag, leaky1.threshold_state, leaky1.state)
         
         # if we have windows open, use waitkey
-
         
         # check for button pushes
         if leaky1.is_waiting() or leaky1.is_deposit():
             try:                
-                block_trigger = 1.0 - block_pin.read()
+                block_trigger = 1.0 -  block_pin.read()
                 time.sleep(0.3)
                 if block_trigger > 0.02:
                     #stdscr.addstr(str(block_trigger))
@@ -199,15 +204,14 @@ def main():
 
         try: prev_frame
         
-        except NameError: print("waiting on frames") #no frame yet
+        except NameError: print("...") #no frame yet
         else: diff_val = sim_mse(save_frame, prev_frame)
 
         if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
             #stdscr.addstr("moving, no sensors \n")
-            print("moving, no sensors")            
+            print("moving, no sensors")
             leaky1.set_motor_values(leaky1.speed, leaky1.speed)
-             
-            time.sleep(0.15)
+            time.sleep(0.14)
 
             # Start sensing subloop
             leaky1.set_motor_values(0,0)
@@ -215,8 +219,14 @@ def main():
             print("Entering sensor loop")
             start_time = time.time()
 
-            # instead of delaying, just run through what we need once
             if (leaky1.is_turning()):
+
+                # alternates directions to a) avoid dripper jam and b) hopefully keep block in place
+                if leaky1.direction == 'turn':
+                    leaky1.direction = 'revturn'
+                elif leaky1.direction == 'revturn':
+                    leaky1.direction = 'turn'
+
                 # we are either a) looking for wall balancing or b)looking to deposit
                 if leaky1.high_humidity:
                     print("Balancing walls: ")
@@ -226,33 +236,36 @@ def main():
 
                     if rednum > 0:
                         if red_head < 0:
-                            leaky1.direction='left'
+                            leaky1.cam_flag = 1
 
                         else:
-                            leaky1.direction = 'right'
+                            leaky1.cam_flag = 0
 
                     elif (heading_angle > 2.9) or (heading_angle < -2.9) :
                         print('walls balanced!')
                         leaky1.walls_balanced()
 
                     elif heading_angle > 0:
-                        leaky1.direction = 'left'
+                        leaky1.cam_flag = 1
+                        print("I think I'm turning left")
         
                     elif heading_angle < 0:
-                        leaky1.direction = 'right'
+                        leaky1.cam_flag = 0
+                        print("I think I'm turning right")
 
                     else: print('no walls in view')
-                    img = Image.fromarray(show_frame)
-                    imname = './TestIm/BalanceOutput_'
-                    imname += str(fcount)
-                    imname += '.png'
-                    img.save(imname)
+                    
+                    #img = Image.fromarray(show_frame)
+                    #imname = './TestIm/BalanceOutput_'
+                    #imname += str(fcount)
+                    #imname += '.png'
+                    #img.save(imname)
                 
                 else: # we must be looking for a deposition spot
                     heading_angle, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green)
                     rednum, _, _ , _ = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
-                      
-                    if ((heading_angle > 2.4) or (heading_angle < -2.4)) and rednum > 0:
+                    print('Looking for deposition, angle: ', heading_angle)
+                    if ((heading_angle > 2.3) or (heading_angle < -2.3)) and rednum > 0:
                         leaky1.similarity = 0
                         leaky1.wall_found()
 
@@ -262,18 +275,18 @@ def main():
                         leaky1.static_visuals()
                         leaky1.similarity = 0
 
-                img = Image.fromarray(show_frame)
-                imname = './TestIm/TurnForDepOutput_'
-                imname += str(fcount)
-                imname += '.png'
-                img.save(imname)
+                #img = Image.fromarray(show_frame)
+                #imname = './TestIm/TurnForDepOutput_'
+                #imname += str(fcount)
+                #imname += '.png'
+                #img.save(imname)
 
             elif leaky1.is_deposit():
                 leaky1 = update_similarity(leaky1, diff_val)
-                print diff_val
-                print leaky1.similarity
+                #print kill_count
 
-                if leaky1.similarity > 3: 
+                if (leaky1.similarity > 3) or ((kill_count > 30) and (diff_val<150)): 
+                    kill_count = 0
                     leaky1.reached_wall()
                     leaky1.similarity = 0
 
@@ -283,20 +296,25 @@ def main():
                     leaky1.direction = 'fwd'
                     print("Heading straight there: ",  heading_angle*180/np.pi)
 
-                elif heading_angle < 0:
-                    leaky1.direction = 'right'
+                else: # alternate directions when turning during deposition
+                    if leaky1.direction == 'revturn':
+                        leaky1.direction = 'turn'
+                    else: 
+                        leaky1.direction = 'revturn'
 
-                elif heading_angle > 0:
-                    leaky1.direction='left'
+                    if heading_angle < 0:
+                        leaky1.cam_flag = 0
+                    elif heading_angle > 0:
+                        leaky1.cam_flag = 1
                 
-                else:  # return should be zero - either no walls or keep turning
-                    leaky1.direction='revturn'
+    
+                kill_count += 1
 
-                img = Image.fromarray(show_frame)
-                imname = './TestIm/DepOutput_'
-                imname += str(fcount)
-                imname += '.png'
-                img.save(imname)
+                #img = Image.fromarray(show_frame)
+                #imname = './TestIm/DepOutput_'
+                #imname += str(fcount)
+                #imname += '.png'
+                #img.save(imname)
 
             elif (leaky1.is_backup() or leaky1.is_go_home()):
                 
@@ -305,15 +323,16 @@ def main():
 
                 print("Balancing red markers", red_sizes)
                 if leaky1.is_backup():
+					# is there a way to update the red filter? probably not
                     print("Markers seen: ", red_locs)
                     if (red_locs < 2):
                         print('home not found')
                         leaky1.direction='revturn'
                     
                     else:
-                        print("Did get here")
+                        leaky1.have_block = False
+                        kill_count = 0 # failsafe                        
                         leaky1.home_spotted()
-                        print(leaky1.do_have_block())
 
                 elif leaky1.is_go_home():
                     if prepare_wait_flag:
@@ -330,7 +349,8 @@ def main():
                             leaky1.close_to_home()
 
                     elif red_locs < 1:
-                        leaky1.direction='left'
+                        leaky1.direction='turn'
+                        leaky1.cam_flag = 1
 
                     elif max(red_sizes) > 3000:
                         print("Preparing for new block")
@@ -341,11 +361,17 @@ def main():
                         print("Going fwd ...")
                         leaky1.direction='fwd'
 
-                    elif heading_angle > 0:
-                        leaky1.direction='left'
+                    else: 
+                        if leaky1.direction == 'turn':
+                            leaky1.direction = 'revturn'
+                        else:
+                            leaky1.direction = 'turn'
 
-                    else:
-                        leaky1.direction = 'right'
+                        if heading_angle > 0:
+                            leaky1.cam_flag = 1
+
+                        else:
+                            leaky1.cam_flag = 0
 
                     print("Heading angle: ", heading_angle*180/np.pi)
     
@@ -366,7 +392,7 @@ def main():
         # nB: reading from the humidity sensors is SLOW
         
         if leaky1.is_sensing():
-            if (time.time() - leaky1.sensing_clock < 25):
+            if (time.time() - leaky1.sensing_clock < 30):
                 
                 # TODO: once we are sure humidity bubble is working
                 # try just reading once, at the end of the sensing pause

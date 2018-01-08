@@ -32,7 +32,7 @@ class LeakyBot(object):
     def __init__(self, motor_left, motor_right):
         # uniform initialization functions
         self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting')
-        self.direction = 'left' 
+        self.direction = 'fwd' 
         self.similarity = 0
         
         # attach motors to object
@@ -101,15 +101,17 @@ class LeakyBot(object):
         
     
     def generic_left_turn(self):
-        self.direction = 'left'
+        self.direction = 'turn'
+        self.cam_flag = 1
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(0.6)
+        time.sleep(0.9)
         self.set_motor_values(0,0)
         
     def generic_right_turn(self):
-        self.direction = 'right'                
+        self.direction = 'turn'
+        self.cam_flag = 0
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(0.6)
+        time.sleep(0.9)
         self.set_motor_values(0,0)
     
     
@@ -124,17 +126,18 @@ class LeakyBot(object):
         self.high_humidity = True
         self.start_turning_frame = 0
         
-        turn_dir = bool(random.getrandbits(1))        
+        turn_dir = bool(random.getrandbits(1))
         if turn_dir:
-            self.direction = 'left'
-        
+            self.cam_flag = 1
         else:
-            self.direction = 'right'
+            self.cam_flag = 0
+
+        self.direction = 'turn'
 
         
     def on_enter_deposit(self):
         print(self.state)
-        self.direction = 'fwd' 
+        self.direction = 'fwd'
         
     def on_exit_deposit(self):
         self.have_block = False
@@ -147,7 +150,7 @@ class LeakyBot(object):
         print(self.state)
         self.direction = 'rev'
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(0.8)
+        time.sleep(1)
         # different to a normal turn, so:
 
         self.direction = 'revturn'
@@ -155,6 +158,7 @@ class LeakyBot(object):
 
             
     def on_exit_backup(self):
+        self.direction = 'revturn' # this is redundant, surely?
         self.set_motor_values(0,0)
         time.sleep(2)
         
@@ -186,23 +190,37 @@ class LeakyBot(object):
             ml.run(Adafruit_MotorHAT.BACKWARD)
             mr.run(Adafruit_MotorHAT.BACKWARD)
         
-        elif check_dir == 'revturn':
+        elif check_dir == 'revturn':           
            if self.cam_flag:
-               ml.setSpeed(int(float(right_speed)*0.6))
+               ml.setSpeed(int(float(right_speed)*1.2))
+               mr.setSpeed(int(float(right_speed)*0.5))
 
            else:
-               mr.setSpeed(int(float(right_speed)*0.6))
+               mr.setSpeed(int(float(left_speed)*1.2))
+               ml.setSpeed(int(float(left_speed)*0.5))
 
            ml.run(Adafruit_MotorHAT.BACKWARD)
            mr.run(Adafruit_MotorHAT.BACKWARD)
 
-        elif check_dir == 'left':
-            ml.run(Adafruit_MotorHAT.BACKWARD)
-            mr.run(Adafruit_MotorHAT.FORWARD)
+        elif check_dir == 'turn':
+           if self.cam_flag:
+               ml.setSpeed(int(float(right_speed)*0.5))
+               mr.setSpeed(int(float(right_speed)*1.2))
+           else:
+               mr.setSpeed(int(float(left_speed)*0.5))
+               ml.setSpeed(int(float(left_speed)*1.2))
 
-        elif check_dir == 'right':
-            ml.run(Adafruit_MotorHAT.FORWARD)
-            mr.run(Adafruit_MotorHAT.BACKWARD)
+           ml.run(Adafruit_MotorHAT.FORWARD)
+           mr.run(Adafruit_MotorHAT.FORWARD)
+
+        #elif check_dir == 'left':
+           
+        #    ml.run(Adafruit_MotorHAT.BACKWARD)
+        #    mr.run(Adafruit_MotorHAT.FORWARD)
+
+        #elif check_dir == 'right':
+        #    ml.run(Adafruit_MotorHAT.FORWARD)
+        #    mr.run(Adafruit_MotorHAT.BACKWARD)
             
         else: 
             ml.run(Adafruit_MotorHAT.FORWARD)
