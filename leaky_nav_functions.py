@@ -10,19 +10,21 @@ dilate_kernel = np.ones((7,7), np.uint8)
 temp_blur_size = 11
 
 # define masks
-def define_masks(cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right):
-    y,x = np.ogrid[0:600, 0:800]
+def define_masks(imshape, cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right):
+    xpix, ypix = imshape
+    print(xpix, ypix)
+    y,x = np.ogrid[0:ypix, 0:xpix]
 
-    outer_mask = np.zeros((600,800))
+    outer_mask = np.zeros((ypix,xpix))
     omask_px = (x-cp[0])**2 + (y-cp[1])**2 <= r_out**2
     outer_mask[omask_px] = 1
 
 
-    inner_mask = np.zeros((600,800))
+    inner_mask = np.zeros((ypix,xpix))
     imask_px = (x-cp[0])**2 + (y-cp[1])**2 <= r_inner**2
     inner_mask[imask_px] = 1
 
-    rim_mask = np.zeros((600,800))
+    rim_mask = np.zeros((ypix,xpix))
     rmask_px = (x-cp[0])**2 + (y-cp[1])**2 <= r_norim**2
     rim_mask[rmask_px] = 1
 
@@ -31,17 +33,17 @@ def define_masks(cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, 
 
 
     # define polygons for ROI
-    front_mask = np.zeros((600,800))
+    front_mask = np.zeros((ypix, xpix))
     cv2.fillConvexPoly(front_mask, poly_front, 1)
 
     # back and sides
-    back_mask = np.zeros((600,800))
+    back_mask = np.zeros((ypix,xpix))
     cv2.fillConvexPoly(back_mask, poly_back, 1)
 
-    left_mask = np.zeros((600,800))
+    left_mask = np.zeros((ypix,xpix))
     cv2.fillConvexPoly(left_mask, poly_left, 1)
 
-    right_mask = np.zeros((600,800))
+    right_mask = np.zeros((ypix,xpix))
     cv2.fillConvexPoly(right_mask, poly_right, 1)
 
     # Define masks
@@ -64,14 +66,35 @@ def boundary_estimate(frame, lg_bound, ug_bound):
     hist_frame = NavImage(frame)
     hist_frame.convertHsv()
     
-    hist = cv2.calcHist([hist_frame.frame], [0], None, [180], [lg_bound, ug_bound])
+    hist = cv2.calcHist([hist_frame.frame], [0], None, [180], [0, 180])
     hist_short = hist[lg_bound:ug_bound]
     
     green_peak = lg_bound + np.argmax(hist_short)
-    l_green = np.array([green_peak - 20, 60, 0])
-    u_green = np.array([green_peak + 20, 255, 255])
+    print(green_peak)
+    l_green = np.array([green_peak - 25, 20, 0])
+    u_green = np.array([green_peak + 25, 255, 255])
     
     return l_green, u_green
+    
+
+def probability_calculator(numblob, whratio):
+	retvec = np.array([0 0 ])
+	if numblob > 2: retvec[0] = 0.1
+	elif numblob > 1: retvec[0] = 0.2
+	else: retvec[0] = 0.3
+	
+	if whratio > 3: retvec[1] = 0.3
+	elif whratio > 2.8: retvec[1] = 0.2
+	else: retvec[1] = 0.1
+	
+	return retvec
+	
+def localisation_calculator(locvec, probmatrix):
+    probvec = np.dot(probmatrix, locvec)
+    probscalar = np.sum(probvec)
+
+	return probscalar
+ 
 
 def omni_balance(cp, omni_frame, mask, l_green, u_green):
     # apply mask
@@ -125,12 +148,14 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
     dep_frame.frame[mask < 1] = 0
         
     # turn until we have one ROI of a sufficient size, with CoM within a central window
+    dep_frame.dilateMask(dilate_kernel, 1)
     dep_frame.erodeMask(erode_kernel, 1)
     dep_frame.dilateMask(dilate_kernel, 1)
 
     _, cnts, _ = cv2.findContours(dep_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
     # check how many segments larger than (threshold)
+
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
     cnts_lg = [c for c in cnts if cv2.contourArea(c)>800]
 
@@ -142,23 +167,24 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
         else:
             boxratio = rect[1][1]
             boxratio /= rect[1][0]
-        print("w/h ratio: ", boxratio, "angle: ", rect[2])
-        if (len(cnts_lg) > 1) or (boxratio < 2.52) :
-            print("Keep turning, can see: ", len(cnts_lg))
-            return 0, dep_frame.frame.copy()
+        #print("w/h ratio: ", boxratio, "angle: ", rect[2])
         
-        else: # Ideally we would turn until wall and blob were merged, but this is hard to generalise
-            blob = cnts_lg[0]
+        #if (len(cnts_lg) > 1) or (boxratio < 2.52) :
+        #    #print("Keep turning, can see: ", len(cnts_lg))
+        #    return len(cnts_lg), 0, boxratio, dep_frame.frame.copy()
+        
+        #else: # Ideally we would turn until wall and blob were merged, but this is hard to generalise
+        blob = cnts_lg[0]
             
-            M = cv2.moments(blob)                
-            cy = int(M['m10']/M['m00']) - cp[0]
-            cx = int(M['m01']/M['m00']) - cp[1]
-            heading_angle = np.arctan2(cy,cx)
+        M = cv2.moments(blob)                
+        cy = int(M['m10']/M['m00']) - cp[0]
+        cx = int(M['m01']/M['m00']) - cp[1]
+        heading_angle = np.arctan2(cy,cx)
 
-            return heading_angle, dep_frame.frame.copy()
+        return len(cnts_lg), heading_angle, boxratio, dep_frame.frame.copy()
 
     else:
-        return 0, dep_frame.frame.copy()
+        return 0, 0, 0, dep_frame.frame.copy()
 
 
 def omni_home(cp, omni_frame, mask, l_red, u_red):

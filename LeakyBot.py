@@ -13,6 +13,7 @@ class LeakyBot(object):
     
     transitions = [ {'trigger':'button_push', 'source':'waiting', 'dest':'turning'},
         {'trigger':'button_push', 'source':'deposit', 'dest':'backup'},
+        {'trigger':'button_push', 'source':'turning', 'dest':'backup', 'unless':'do_high_humidity'},
         {'trigger':'walls_balanced', 'source':'turning', 'dest':'sensing', 'prepare':'set_loop', 'conditions':['do_have_block', 'do_high_humidity']}, 
         {'trigger':'humidity_maintained', 'source': 'sensing', 'dest':'driving', 'conditions':'do_high_humidity'},
         {'trigger':'stop_driving', 'source':'driving', 'dest':'sensing'},
@@ -33,7 +34,7 @@ class LeakyBot(object):
         # uniform initialization functions
         self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting')
         self.direction = 'fwd' 
-        self.similarity = 0
+        self.probability = np.zeros((6,6)) 
         
         # attach motors to object
         self.motor_left = motor_left
@@ -53,6 +54,21 @@ class LeakyBot(object):
         
     def do_high_humidity(self):
         return(self.high_humidity)
+        
+    def set_probability(self, diagvec):
+        self.probability = np.diagflat([diagvec])
+        
+    def add_probability(self, addvec):
+
+		prob_matrix = self.probability
+		prob_matrix[0][0] += addvec[0]
+		prob_matrix[1][1] += addvec[1]
+		prob_matrix[2][2] += addvec[2]
+		prob_matrix[3][3] += addvec[3]
+		prob_matrix[4][4] += addvec[4]
+		prob_matrix[5][5] += addvec[5]
+		
+		self.probability = prob_matrix
 
         
     def on_enter_turning(self):
@@ -85,6 +101,13 @@ class LeakyBot(object):
     # no need for this?
     def set_loop(self):
         self.sensor_loop = 0
+        
+    def set_turn_direction(self):
+        # alternates directions to a) avoid dripper jam and b) hopefully keep block in place
+        if self.direction == 'turn':
+            self.direction = 'revturn'
+        elif self.direction == 'revturn':
+            self.direction = 'turn'
         
 
     def set_turn_status(self):
@@ -150,7 +173,7 @@ class LeakyBot(object):
         print(self.state)
         self.direction = 'rev'
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(1)
+        time.sleep(0.6)
         # different to a normal turn, so:
 
         self.direction = 'revturn'
@@ -182,7 +205,7 @@ class LeakyBot(object):
             mr.run(Adafruit_MotorHAT.RELEASE)
 
         elif check_dir == 'fwd':
-            print("forward check")
+            #print("forward check")
             ml.run(Adafruit_MotorHAT.FORWARD)
             mr.run(Adafruit_MotorHAT.FORWARD)
         
