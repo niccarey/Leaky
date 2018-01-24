@@ -70,11 +70,14 @@ sides_mask, front_mask, wide_mask = define_masks([600, 600], cp, r_out, r_inner,
 lg_bound = 60
 ug_bound = 100
 
-# Initial guesses for filters
+lr_bound = 0
+ur_bound = 10
+
+# Initial guesses for filters (overwritten later, can probably delete)
 l_green = np.array([40, 60, 0])
 u_green = np.array([90, 255, 255])
-l_red = np.array([150, 80, 50])
-u_red = np.array([180, 255, 255])
+l_red = np.array([0, 80, 50])
+u_red = np.array([0, 255, 255])
 omni_frame = np.zeros((600,800,3))
 # ----------------------------------------------------------------------
 
@@ -83,7 +86,6 @@ omni_frame = np.zeros((600,800,3))
 def shutdownLeaky():
     myMotor1.run(Adafruit_MotorHAT.RELEASE)
     myMotor2.run(Adafruit_MotorHAT.RELEASE)
-
     picam.stop()
     cv2.destroyAllWindows()
 
@@ -93,11 +95,11 @@ atexit.register(shutdownLeaky)
 def main():
 
     print("Leaky started ")
-    
+
     global deposit_edge
     global backup_edge
     global cX, cY
-    
+
     # Initialise cameras - hold auto white balance constant to improve filtering
     print("Setting camera gains and white balance ")
     camgain = (1.4,2.1)
@@ -106,7 +108,7 @@ def main():
 
     # Set Arduino pressure sensor pin
     block_pin = board.get_pin('a:5:i')
-    
+
     print("Establishing humidity sensing GPIO settings ")
     # Set up humidity sensing
     gp.setwarnings(False)
@@ -116,72 +118,78 @@ def main():
     gp.setup(17, gp.IN)
     gp.setup(27, gp.IN)
     gp.setup(22, gp.IN)
-    
+
     # usage: ST(clock pin, data pin) (default voltage)
     sens1 = ST(11, 17)
     sens2 = ST(11, 27)
     sens3 = ST(11, 22)
 
     sens_array = [sens1, sens2, sens3]
-    depvec = np.array([1, 1, 1, 1, 0, 0])
-    homevec = np.array([0,0,0,0,1,1])
-    
+    depvec = np.array([1.0, 1.0, 1.0, 1.0, 0, 0])
+    homevec = np.array([0,0,0,0,1.0,1.0])
+
     hum_threshold = 65
-    
+
     # Set up motors
     print("Setting motor parameters")
-    leaky1 = LeakyBot(myMotor1, myMotor2)    
+    leaky1 = LeakyBot(myMotor1, myMotor2)
     leaky1.speed = 200
     leaky1.direction = 'fwd'
-    
+
     print("Setting navigation parameters")
 
     # take a snapshot, make an adaptive estimate of colour filter
     init_frame = picam.read()
     init_crop = init_frame[367:937, 536:1136,:]
+
     # update boundary functions (assumes we have some blocks visible)
-    l_green, u_green = boundary_estimate(init_crop, lg_bound, ug_bound)
-    
-    running = True    
+    l_green, u_green = boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 20, 255, 0, 255, 20)
+    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 80, 255, 50, 220, 10)
+
+    running = True
     fcount = 1
     kill_count = 1
-    prepare_wait_flag = 0
 
     winset = 0
-    
+
     print("Waiting for block ...")
-    while running:    
-        
+    while running:
+
         # check for button pushes
-        if leaky1.is_waiting() or leaky1.is_deposit():
-            try:                
+        if leaky1.is_waiting() or leaky1.is_deposit() or leaky1.is_turning():
+            try:
                 block_trigger = 1.0 -  block_pin.read()
                 time.sleep(0.3)
                 if block_trigger > 0.02:
                     print("Triggered, " , block_trigger)
+                    leaky1.generic_rev_turn(0.2)
+                    time.sleep(0.3)
+                    leaky1.generic_turn(0.3)
+                    time.sleep(0.3)
+                    leaky1.generic_rev_turn(0.2)
                     leaky1.button_push()
-                
+
             except Exception as e:
                 print("Problem reading board, retry ...")
-                print(e)    
+                print(e)
         
         # get camera frames
         full_frame = picam.read()
         omni_frame = full_frame[367:967, 536:1136,:]
         save_frame = omni_frame.copy()
-        
-        try: prev_frame                
+
+        try: prev_frame
         except NameError: print("...") #no frame yet
-        else: 
-			if leaky1.direction == 'turn': # alternates
+        else:
+            if (leaky1.direction == 'revturn') and (not leaky1.is_sensing()):
                 diff_val = sim_mse(save_frame, prev_frame)
-                
+                print("vis sim: ", diff_val)
+
 
         if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
-            print("Deposition probability: ", leaky1.probability)
-	        # -----------------------------------
-	        # Each loop, move in pre-set direction, then stop and sense
-            print("moving, no sensors")
+            # -----------------------------------
+            # Each loop, move in pre-set direction, then stop and sense
+            #print("moving, no sensors")
             leaky1.set_motor_values(leaky1.speed, leaky1.speed)
             time.sleep(0.14)
 
@@ -190,7 +198,6 @@ def main():
             #print("Entering sensor loop")
             start_time = time.time()
             # -----------------------------------
-            
             if (leaky1.is_turning()):
                 # set direction
                 leaky1.set_turn_direction()
@@ -199,11 +206,11 @@ def main():
                 if leaky1.high_humidity:
                     print("Balancing walls: ")
                     heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
-                    rednum, red_head, _ , _ = omni_home(cp, omni_frame, sides_mask, l_red, u_red)
-                    print(heading_angle)
+                    rednum, red_head, red_frame = leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
 
                     # ---------------------------------
                     # make sure we cannot see home base, try to balance walls
+                    print("Can see red bars: ", rednum)
                     if rednum > 0:
                         if red_head < 0: leaky1.cam_flag = 1
                         else: leaky1.cam_flag = 0
@@ -212,40 +219,42 @@ def main():
                         print('walls balanced!')
                         leaky1.walls_balanced()
 
-                    elif heading_angle > 0: leaky1.cam_flag = 1        
+                    elif heading_angle > 0: leaky1.cam_flag = 1
                     elif heading_angle < 0: leaky1.cam_flag = 0
                     else: print('no walls in view')
-                    
+
+                    #img = Image.fromarray(red_frame)
+                    #imname = './TestIm/LeavingHome_'
+                    #imname += str(fcount)
+                    #imname += '.png'
+                    #img.save(imname)
+
                 else: # we must be looking for a deposition spot
                     blob_num, heading_angle, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green)
-                    
-                    rednum, _, _ , _ = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
-                    #print('Looking for deposition, angle: ', heading_angle)
-                    	
-                    if ((heading_angle > 2.3) or (heading_angle < -2.3)) and rednum > 0:
+                    rednum, _, _   = leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
+
+                    if (blob_num < 2) and ((heading_angle > 2.3) or (heading_angle < -2.3)) and rednum > 0:
                         print("moving to deposition")
                         leaky1.wall_found()
-                    
-                    # SET PROBABILITY
-                    if blobnum > 0:
-                        probvec = probability_calculator(blob_num, box_ratio)
-                        leaky1.set_probability([probvec]) # should only set the relevant diagonals
-                    
-                    # CHECK SIM, UPDATE PROBABILITY:
-                    # should also decrease probability if too many large differences build up
-                    if diff_val < 80:
-						simvec = np.array([0 0 0.1 0 0 0])
-					elif diff_val > 800:
-						simvec = np.array([0 0 -0.1 0 0 0 ])
-        			else:
-						simvec = np.zeros(6)
-						
-					leaky1.update_probability(simvec)
-					scalar_prob = localisation_calculator(depvec, leaky1.probability)
-					
-                    # DO PROBABILITY CONDITIONALS
 
-                    if scalar_prob > 0.9:
+                    # SET PROBABILITY
+                    if blob_num > 0:
+                        blob_vec = dep_prob_calculator(blob_num, box_ratio)
+                        probvec = np.diagonal([leaky1.probability]).copy()
+                        np.put(probvec,[0,1], blob_vec.astype(float))
+                        leaky1.set_probability([probvec]) # should only set the relevant diagonals
+
+                    if diff_val < 80:
+                        simvec = np.array([0.0, 0, 0.1, 0, 0, 0])
+                    else:
+                        simvec = np.zeros(6).astype(float)
+
+                    leaky1.update_probability(simvec)
+                    deposit_prob = localisation_calculator(depvec, leaky1.probability)
+
+                    print("location estimation: ", deposit_prob)
+
+                    if deposit_prob > 0.8:
                         leaky1.static_visuals()
                         leaky1.set_probability([0,0,0,0]) # only sets deposition values
 
@@ -256,42 +265,44 @@ def main():
                 #img.save(imname)
 
             elif leaky1.is_deposit():
-                
+
                 blob_num, heading_angle, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green)
+                #print("seeing: ", blob_num, box_ratio)
 
                 # SET PROBABILITY
-                if blobnum > 0:
-                    probvec = probability_calculator(blob_num, box_ratio)
-                    leaky1.set_probability([probvec]) # should only set the relevant diagonals
-                        
-						
-				leaky1.update_probability(simvec)
+                if blob_num > 0:
+                    blob_vec = dep_prob_calculator(blob_num, box_ratio)
+                    probvec = np.diagonal([leaky1.probability]).copy()
+                    np.put(probvec, [0,1], blob_vec.astype(float))
+                    leaky1.set_probability([probvec])
 
-                if (leaky1.probability > 0.9) or (kill_count > 30): 
+                deposit_prob = localisation_calculator(depvec, leaky1.probability)
+                print("location estimation: ",  deposit_prob)
+
+                if (deposit_prob > 0.8) or (kill_count > 30): 
                     kill_count = 0
                     leaky1.set_probability([0, 0, 0, 0])
                     leaky1.reached_wall()
 
-                if (heading_angle > 2.6) or (heading_angle < -2.6):
+                if blob_num < 2 and ((heading_angle > 2.6) or (heading_angle < -2.6)):
                     leaky1.direction = 'fwd'
-                    #print("Heading straight there: ",  heading_angle*180/np.pi)
 
                 else: # alternate directions when turning during deposition
                     if leaky1.direction == 'revturn':
-                        leaky1.direction = 'turn'                        
-
-                    else: 
+                        print(diff_val)
                         # Only update similarity vector on forward turns
                         if diff_val < 80:
-        				    simvec = np.array([0 0 0.1 0 0 0])
-                	    else:
-				            simvec = np.zeros(6)
-				            
-                        leaky1.direction = 'revturn'
+                            simvec = np.array([0, 0, 0.1, 0, 0 ,0])
+                	else:
+                            simvec = np.zeros(6)
+
+                        leaky1.update_probability(simvec)
+                        print("debug: " , simvec)
 
                     if heading_angle < 0: leaky1.cam_flag = 0
                     elif heading_angle > 0: leaky1.cam_flag = 1
-                
+
+                leaky1.set_turn_direction()
                 kill_count += 1
 
                 #img = Image.fromarray(show_frame)
@@ -301,49 +312,41 @@ def main():
                 #img.save(imname)
 
             elif (leaky1.is_backup() or leaky1.is_go_home()):
-                
-                # look for red walls. Can we dynamically update the red filter in any useful way?
-                red_locs, heading_angle, red_sizes, show_frame = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
 
-                print("Balancing red markers", red_sizes)
+                red_num, heading_angle, red_sizes, matched_filt_flag, show_frame = omni_home(cp, omni_frame, front_mask, l_red, u_red, l_green, u_green)
+                # update homing matrix
+                home_vec = home_prob_calculator(red_num, red_sizes, 5000, matched_filt_flag)
+                probvec = np.diagonal([leaky1.probability]).copy()
+                np.put(probvec, [4,5], home_vec.astype(float))
+
+                leaky1.set_probability([probvec])
+                home_prob = localisation_calculator(homevec, leaky1.probability)
+                print("Looking for entrance: ", home_prob)
+
                 if leaky1.is_backup():
-                    print("Markers seen: ", red_locs)
+                    print("Markers seen: ", red_num)
 
-                    if (red_locs < 2):
-                        print('home not found')
+                    if (red_num < 2):
                         leaky1.direction='revturn'
-                    
+
                     else:
                         leaky1.have_block = False
-                        kill_count = 0 # failsafe                        
+                        kill_count = 0 # failsafe
                         leaky1.home_spotted()
 
                 elif leaky1.is_go_home():
-                    if prepare_wait_flag:
-                        if red_locs < 1:
-                            prepare_wait_flag = 0
-                            leaky1.close_to_home()
-                        else:
-                            #if leaky1.cam_flag: leaky1.generic_right_turn()
-                            #else: leaky1.generic_left_turn()
-                            
-                            prepare_wait_flag = 0
-                            leaky1.close_to_home()
-
-                    elif red_locs < 1:
-                        leaky1.direction='turn'
-                        leaky1.cam_flag = 1
-
-                    elif max(red_sizes) > 3000:
-                        print("Preparing for new block")
-                        prepare_wait_flag = 1
+                    if home_prob > 0.4:
+		        leaky1.close_to_home()
                         leaky1.cam_flag = bool(random.getrandbits(1))
 
-                    elif (heading_angle > 2.3) or (heading_angle < -2.3):
+                    elif red_num < 1:
+                        leaky1.direction='turn'
+
+                    elif ((heading_angle > 2.3) or (heading_angle < -2.3)) and home_prob > 0.2:
                         print("Going fwd ...")
                         leaky1.direction='fwd'
 
-                    else: 
+                    else:
                         leaky1.set_turn_direction()
                         if heading_angle > 0: leaky1.cam_flag = 1
                         else: leaky1.cam_flag = 0
@@ -351,11 +354,11 @@ def main():
                     print("Heading angle: ", heading_angle*180/np.pi)
     
 
-                #img = Image.fromarray(show_frame)
-                #imname = './TestIm/HomeOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
+                img = Image.fromarray(show_frame)
+                imname = './TestIm/HomeOutput_'
+                imname += str(fcount)
+                imname += '.png'
+                img.save(imname)
 
         if winset:
             cv2.imshow("Camera view", show_frame)
@@ -377,12 +380,6 @@ def main():
                     except Exception as e:
                         print("Sensor problem: ", (hum_count+1))
 
-                #img = Image.fromarray(save_frame)
-                #imname = './TestIm/SenseOutput_'
-                #imname += str(fcount)
-                #imname += '.png'
-                #img.save(imname)
-                
             else: # last sensor reading
                 print("Entering final sensor read ...")
                 hum_sum = 0
@@ -419,12 +416,12 @@ def main():
                 
 
         elif leaky1.is_driving():
-            leaky1 = update_similarity(leaky1, diff_val)
-            if leaky1.similarity > 5:
-                leaky1.static_visuals()
-                leaky1.similarity = 0
+            #leaky1 = update_similarity(leaky1, diff_val)
+            #if leaky1.similarity > 5:
+            #    leaky1.static_visuals()
+            #    leaky1.similarity = 0
 
-            elif (time.time() - leaky1.driving_clock < 0.5):
+            if (time.time() - leaky1.driving_clock < 0.3):
                 time.sleep(0.1)
             
             else:

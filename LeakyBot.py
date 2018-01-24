@@ -1,5 +1,6 @@
 from transitions import Machine
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+import numpy as np
 import time
 import random
 
@@ -48,44 +49,40 @@ class LeakyBot(object):
         self.speed = 0
         self.high_humidity = True
         self.have_block = False
-            
+
     def do_have_block(self):
         return(self.have_block)
-        
+
     def do_high_humidity(self):
         return(self.high_humidity)
-        
+
     def set_probability(self, diagvec):
         self.probability = np.diagflat([diagvec])
-        
-    def add_probability(self, addvec):
 
-		prob_matrix = self.probability
-		prob_matrix[0][0] += addvec[0]
-		prob_matrix[1][1] += addvec[1]
-		prob_matrix[2][2] += addvec[2]
-		prob_matrix[3][3] += addvec[3]
-		prob_matrix[4][4] += addvec[4]
-		prob_matrix[5][5] += addvec[5]
-		
-		self.probability = prob_matrix
-
+    def update_probability(self, addvec):
+        prob_matrix = self.probability. astype(float)
+        prob_vec = np.diagonal(prob_matrix).copy()
+        print( "debug: ", prob_vec, addvec)
         
+        prob_vec += addvec.astype(float)
+        ret_matrix = np.diagflat([prob_vec])
+
+        self.probability = ret_matrix
+
     def on_enter_turning(self):
         print(self.state)
-                
-        
+
     def on_exit_turning(self):
         # Pause briefly before transition
         self.set_motor_values(0,0)
         time.sleep(2)
-                
+
     def on_enter_driving(self):
         print(self.state)
-        self.direction = 'fwd' 
+        self.direction = 'fwd'
         self.set_motor_values(self.speed, self.speed)
         self.driving_clock = time.time()
-        
+
     def on_exit_driving(self):
         self.set_motor_values(0,0)
         
@@ -96,19 +93,17 @@ class LeakyBot(object):
         self.set_motor_values(0,0)
         self.sensing_clock = time.time()
         self.sensor_loop += 1
-                
-    
+
     # no need for this?
     def set_loop(self):
         self.sensor_loop = 0
-        
+
     def set_turn_direction(self):
         # alternates directions to a) avoid dripper jam and b) hopefully keep block in place
         if self.direction == 'turn':
             self.direction = 'revturn'
         elif self.direction == 'revturn':
             self.direction = 'turn'
-        
 
     def set_turn_status(self):
         turn_dir = bool(random.getrandbits(1))
@@ -122,21 +117,30 @@ class LeakyBot(object):
         self.set_motor_values(0,0)
         time.sleep(2)
         
-    
-    def generic_left_turn(self):
-        self.direction = 'turn'
-        self.cam_flag = 1
+
+    def go_backwards(self, drive_time):
+        store_direction = self.direction
+        self.direction = 'rev'
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(0.9)
+        time.sleep(drive_time)
         self.set_motor_values(0,0)
+        self.direction = store_direction
+    
+    def generic_turn(self, drivetime):
+        store_direction = self.direction
+        self.direction = 'turn'
+        self.set_motor_values(self.speed, self.speed)
+        time.sleep(drivetime)
+        self.set_motor_values(0,0)
+        self.direction = store_direction
         
-    def generic_right_turn(self):
-        self.direction = 'turn'
-        self.cam_flag = 0
+    def generic_rev_turn(self, drivetime):
+        store_direction = self.direction
+        self.direction = 'revturn'
         self.set_motor_values(self.speed, self.speed)
-        time.sleep(0.9)
+        time.sleep(drivetime)
         self.set_motor_values(0,0)
-    
+        self.direction = store_direction
     
     def on_enter_waiting(self):
         print(self.state)
