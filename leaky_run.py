@@ -24,6 +24,7 @@ import threading
 
 from LeakyBot import LeakyBot
 from leaky_nav_functions import *
+from KeypointExpanded import KeypointExpanded
 
 # Motor initialisation:
 print("Initialising motor hat ...")
@@ -70,8 +71,8 @@ sides_mask, front_mask, wide_mask = define_masks([600, 600], cp, r_out, r_inner,
 lg_bound = 60
 ug_bound = 100
 
-lr_bound = 0
-ur_bound = 10
+lr_bound = 5
+ur_bound = 25
 
 # Initial guesses for filters (overwritten later, can probably delete)
 l_green = np.array([40, 60, 0])
@@ -96,8 +97,6 @@ def main():
 
     print("Leaky started ")
 
-    global deposit_edge
-    global backup_edge
     global cX, cY
 
     # Initialise cameras - hold auto white balance constant to improve filtering
@@ -136,15 +135,36 @@ def main():
     leaky1.speed = 200
     leaky1.direction = 'fwd'
 
-    print("Setting navigation parameters")
-
-    # take a snapshot, make an adaptive estimate of colour filter
+    print("Setting up homing system")
+    raw_input("Press Enter when ready for homing snapshot")
+    
+    # take a snapshot, make an adaptive estimate of colour filter and set homing snapshot
     init_frame = picam.read()
-    init_crop = init_frame[367:937, 536:1136,:]
-
+    init_crop = init_frame[367:967, 536:1136,:]
     # update boundary functions (assumes we have some blocks visible)
     l_green, u_green = boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 20, 255, 0, 255, 20)
-    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 80, 255, 50, 220, 10)
+    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 100, 255, 80, 255, 15)
+    
+    print(" ... setting up unwarp map ...")
+    xmap, ymap = buildMap(600,600, 720, 360, 300, cp[0], cp[1])
+    print("...done")
+    
+    print(" ... initialise tracking mask: ")
+    o_width, tracking_mask, unwrap_gray = init_tracking_mask(xmap, ymap, l_red, u_red, init_crop.copy(), wide_mask.copy())
+    
+    print(" ... establishing SIFT features")
+    sift = cv2.xfeatures2d.SIFT_create()
+    kp_sift, des_sift = sift.detectAndCompute(unwrap_gray, tracking_mask.astype(np.uint8))
+
+    print(" ... estimating identified feature locations")
+    InitialKeypoints = KeypointExpanded(kp_sift)
+    a0 = -188.44
+    a2 = 0.0072
+    a3 = -0.0000374
+    a4 = 0.0000000887
+    xS = 155
+    InitialKeypoints = keypoint_height_calc(InitialKeypoints, a0, a2, a3, a4, xS)
+    print("Finished setting up homing system")
 
     running = True
     fcount = 1
@@ -186,15 +206,15 @@ def main():
                 print("vis sim: ", diff_val)
 
 
-        if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
+        if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()):
             # -----------------------------------
             # Each loop, move in pre-set direction, then stop and sense
             #print("moving, no sensors")
-            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
+            leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
             time.sleep(0.14)
 
             # Start sensing subloop
-            leaky1.set_motor_values(0,0)
+            leaky1.auto_set_motor_values(0,0)
             #print("Entering sensor loop")
             start_time = time.time()
             # -----------------------------------
@@ -311,54 +331,82 @@ def main():
                 #imname += '.png'
                 #img.save(imname)
 
-            elif (leaky1.is_backup() or leaky1.is_go_home()):
-
+            elif (leaky1.is_backup()):
+                # we are just looking for rear wall, then we transition to homing algorithm
                 red_num, heading_angle, red_sizes, matched_filt_flag, show_frame = omni_home(cp, omni_frame, front_mask, l_red, u_red, l_green, u_green)
-                # update homing matrix
-                home_vec = home_prob_calculator(red_num, red_sizes, 5000, matched_filt_flag)
-                probvec = np.diagonal([leaky1.probability]).copy()
-                np.put(probvec, [4,5], home_vec.astype(float))
 
-                leaky1.set_probability([probvec])
-                home_prob = localisation_calculator(homevec, leaky1.probability)
-                print("Looking for entrance: ", home_prob)
+                print("Looking for entrance, Markers seen: ", red_num)
+                if (red_num < 2):
+                    leaky1.direction='revturn'
 
-                if leaky1.is_backup():
-                    print("Markers seen: ", red_num)
+                else:
+                    leaky1.have_block = False
+                    kill_count = 0 # failsafe
+                    leaky1.home_spotted()
+            
+        elif leaky1.is_go_home():
+            homing = True
+	    while homing:
+	        read_im = picam.read()
+		compare_im = read_im[367:967, 536:1136,:]
+    		
+		c_width, delta, h_store, tracking_mask, unwrap_gray = run_tracking_mask(xmap, ymap, l_red, u_red, compare_im.copy(), wide_mask.copy(), o_width)
+		
+		if delta < 1: ratio_weight = 0
+		else: ratio_weight = 0.2
+		
+		if hstore > 84: height_weight = 0.3
+		else: height_weight = 0
 
-                    if (red_num < 2):
-                        leaky1.direction='revturn'
 
-                    else:
-                        leaky1.have_block = False
-                        kill_count = 0 # failsafe
-                        leaky1.home_spotted()
+		kp_comp_sift, des_comp_sift = sift.detectAndCompute(comp_gray_unwrap, tracking_mask.astype(np.uint8))
+		if (not (des_comp_sift is None)) :
+                    sift_matches = bf.match(des_sift, des_comp_sift) 
+		    sift_matches = sorted(sift_matches, key= lambda x:x.distance)
+                    match_image = cv2.drawMatches(unwrap_base, kp_sift, comp_unwrap, kp_comp_sift, sift_matches[:15], None, flags=2)
+                    
+                    rotation, x_est, y_est = est_egomotion(sift_matches, InitialKeypoints, kp_comp_sift)
+                    if abs(rotation*180/np.pi) > 5:
+                        direction_weight = 0
+                        if rotation > 0:
+                            leaky1.cam_flag = 1
+                            leaky1.direction = 'left'
+                            leaky1.set_motor_values(leaky1.speed, leaky1.speed, Adafruit_MotorHAT.BACKWARD, Adafruit_MotorHAT.FORWARD)
+                            time.sleep(0.08)
+                            leaky1.auto_set_motor_values(0,0)
+                
+                        elif rotation < 0:
+                            leaky1.cam_flag = 0
+                            leaky1.direction = 'right'
+                            leaky1.set_motor_values(leaky1.speed, leaky1.speed, Adafruit_MotorHAT.FORWARD, Adafruit_MotorHAT.BACKWARD)
+                            time.sleep(0.08)
+                            leaky1.auto_set_motor_values(0,0)
+                
+                    elif transx < -5:
+                        leaky1.direction = 'fwd'
+                        leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
+                        time.sleep(0.2)
+                        leaky1.auto_set_motor_values(0,0)
+              
+                    if (abs(rotation*180/np.pi) < 10) and ((ratio_weight > 0) or (height_weight>0)): direction_weight += 0.1
+                    else: direction_weight = 0
+        
+                    print("Weightings: ", ratio_weight, height_weight, direction_weight)
+                    weight_array = np.array([ratio_weight, height_weight, direction_weight])
 
-                elif leaky1.is_go_home():
-                    if home_prob > 0.4:
-		        leaky1.close_to_home()
+                    if (np.sum(weight_array)> 0.5 and (ratio_weight >0 and height_weight>0)) or delta > 2:
                         leaky1.cam_flag = bool(random.getrandbits(1))
-
-                    elif red_num < 1:
-                        leaky1.direction='turn'
-
-                    elif ((heading_angle > 2.3) or (heading_angle < -2.3)) and home_prob > 0.2:
-                        print("Going fwd ...")
-                        leaky1.direction='fwd'
-
-                    else:
-                        leaky1.set_turn_direction()
-                        if heading_angle > 0: leaky1.cam_flag = 1
-                        else: leaky1.cam_flag = 0
-
-                    print("Heading angle: ", heading_angle*180/np.pi)
-    
-
-                img = Image.fromarray(show_frame)
-                imname = './TestIm/HomeOutput_'
-                imname += str(fcount)
-                imname += '.png'
-                img.save(imname)
+                        homing = False
+                        leaky1.close_to_home()
+             		                
+                else: 
+		    print("cannot find relevant features, backing up")
+                    leaky1.cam_flag = 1
+                    leaky1.direction = 'revturn'
+                    leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
+                    time.sleep(0.1)
+                    leaky1.auto_set_motor_values(0,0)
+        
 
         if winset:
             cv2.imshow("Camera view", show_frame)

@@ -4,9 +4,13 @@
 import cv2
 from navImage import NavImage
 import numpy as np
+from PIL import Image # can remove this after debug
+
 
 erode_kernel = np.ones((5,5), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
+
+dilate_kernel_big = np.ones((11,11), np.uint8)
 temp_blur_size = 11
 
 # define masks
@@ -61,40 +65,247 @@ def define_masks(imshape, cp, r_out, r_inner, r_norim, poly_front, poly_back, po
     return sides_mask, front_mask, wide_mask
 
 
-def boundary_estimate(frame, lg_bound, ug_bound):
+def boundary_estimate(frame, l_bound, u_bound, l_sat, u_sat, l_val, u_val, dh):
     # convert to HSV
     hist_frame = NavImage(frame)
     hist_frame.convertHsv()
-    
+
     hist = cv2.calcHist([hist_frame.frame], [0], None, [180], [0, 180])
-    hist_short = hist[lg_bound:ug_bound]
+    #print(hist)
+    hist_short = hist[l_bound:u_bound]
+
+    col_peak = l_bound + np.argmax(hist_short)
+    print(col_peak)
+    l_return = np.array([col_peak - dh, l_sat, l_val])
+    u_return = np.array([col_peak + dh, u_sat, u_val])
+
+    return l_return, u_return
+
+
+def buildMap(widthS, heightS, widthD, heightD, radS, cx, cy):
+    # set up destination maps for x, y coordinates
+    map_x = np.zeros((heightD, widthD), np.float32)
+    map_y = np.zeros((heightD, widthD), np.float32)
+    for y in range(0, int(heightD-1)):
+        for x in range(0, int(widthD-1)):
+            # work out azimuth, elevation based on DEST image (rho)
+            rho = (float(y)/float(heightD))*radS
+            theta = (float(x)/float(widthD))*2.0*np.pi # just converts degree to radians
+            # corresponding positions in SOURCE image:
+            xS = cx + rho*np.sin(theta)
+            yS = cy + rho*np.cos(theta)
+            map_x.itemset((y,x), int(xS))
+            map_y.itemset((y,x), int(yS))            
     
-    green_peak = lg_bound + np.argmax(hist_short)
-    print(green_peak)
-    l_green = np.array([green_peak - 25, 20, 0])
-    u_green = np.array([green_peak + 25, 255, 255])
+    return map_x, map_y
     
-    return l_green, u_green
+def unwarp(img_array, xmap, ymap):
+    output = cv2.remap(img_array, xmap, ymap, cv2.INTER_LINEAR)
+    return output
+    
+def get_home_frame(l_red, u_red, col_frame):
+    
+    redbar_frame = NavImage(col_frame)
+    redbar_frame.convertHsv()
+    redbar_frame.hsvMask(l_red, u_red)
+    redbar_frame.erodeMask(erode_kernel, 1)
+    redbar_frame.dilateMask(dilate_kernel_big, 1)
+
+    return(redbar_frame.frame)
+    
+def get_striped_mask(o_width, ymax, ymin, xmin, xmax, unwrapshape):
+       
+    stripe_mask_corners = np.array([[xmin, ymax], [xmin, ymin], [xmax,ymin], [xmax,ymax]])
+    mask_shape = unwrapshape
+    stripe_mask = np.zeros((mask_shape))
+    cv2.fillConvexPoly(stripe_mask, stripe_mask_corners, 1)
+
+    return stripe_mask
+
+    
+def init_tracking_mask(xmap, ymap, l_red, u_red, col_frame, wide_mask):    
+    gray_frame = cv2.cvtColor(col_frame, cv2.COLOR_BGR2GRAY)
+    unwrap_gray = unwarp(gray_frame, xmap, ymap)
+    unwrap_init = unwarp(col_frame, xmap, ymap)
+    
+    wide_mask[gray_frame>230] = 0
+    wide_erode = cv2.erode(wide_mask.astype(np.uint8), erode_kernel, iterations=1)
+    mask_unwrap = unwarp(wide_erode, xmap, ymap)
+    
+    home_frame = get_home_frame(l_red, u_red, unwrap_init)    
+    
+    _, cnts, _ = cv2.findContours(home_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)>300]
+    xmin = 720
+    xmax = 0
+    for c in cnts_lg:
+        x, y, w, h = cv2.boundingRect(c)
+        if x > 100 and x < 550:
+            if x+w > xmax: xmax = x+w
+            if x < xmin: xmin = x
+
+    owidth = xmax - xmin 
+    stripe_mask = get_striped_mask(owidth, 180,360, xmin, xmax, mask_unwrap.shape)
+    
+    tracking_mask = cv2.bitwise_and(mask_unwrap.astype(np.uint8), stripe_mask.astype(np.uint8))
+    tracking_mask[tracking_mask>0] = 255
+
+    return owidth, tracking_mask, unwrap_gray
+
+
+def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
+    gray_frame = cv2.cvtColor(col_frame, cv2.COLOR_BGR2GRAY)
+    unwrap_gray = unwarp(gray_frame, xmap, ymap)
+    unwrap_col = unwarp(col_frame, xmap, ymap)    
+    home_frame = get_home_frame(l_red, u_red, col_frame)        
+
+    wide_mask[gray_frame>230] = 0
+    wide_erode = cv2.erode(wide_mask.astype(np.uint8), erode_kernel, iterations=1)
+    mask_unwrap = unwarp(wide_erode, xmap, ymap)
+    
+    _, cnts, _ = cv2.findContours(home_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)>300]
+    xmin = 600
+    xmax = 0
+    ymin = 0
+    for c in cnts_lg:
+        x, y, w, h = cv2.boundingRect(c)
+        if y > ymin: 
+            ymin = y
+            hstore = h
+        if (x > 50) and (x< 650):
+            if x+w > xmax: xmax = x+w
+            if x < xmin : xmin = x
+
+    cwidth = xmax - xmin
+    delta = float(cwidth)/float(owidth)
+
+    if delta < 1:
+        smask_y = int(delta*180)
+    else: 
+        smask_y = 180
+
+    stripe_mask = get_striped_mask(cwidth, smask_y, ymin, xmin, xmax, mask_unwrap.shape)
+
+    tracking_mask = cv2.bitwise_and(mask_unwrap.astype(np.uint8), stripe_mask.astype(np.uint8))
+    tracking_mask[tracking_mask>0] = 255
+    
+    return cwidth, delta, hstore, tracking_mask, unwrap_gray
+    
+def keypoint_height_calc(IK, a0, a2, a3, a4, xS):    
+    for kp_it in IK.keypoints:
+        uc_w = (kp_it.pt[0])*np.pi/(4*180)
+        vc_w = kp_it.pt[1]*300/360
+        # Convert to omnicam pixel positions
+        uc =  vc_w*np.sin(uc_w)
+        vc =  vc_w*np.cos(uc_w)
+        #print(uc,vc)
+        rho = np.sqrt(np.square(uc) + np.square(vc ))
+        frho = a0 + a2*np.square(rho) + a3*np.power(rho,3) + a4*np.power(rho,4)
+        lambda_est = xS/(uc)
+        # invert because calibration assumes an upside-down mirror
+        z_est = -(lambda_est*frho)
+        IK.add_height([z_est])
+        
+    return IK
+    
+        
+def mask_weight_calcs(cwidth, owidth):
+    delta = float(cwidth)/float(owidth)
+    if delta < 1:
+        ratio_weight = 0
+        smask_y = int(delta*180)
+    else: 
+        smask_y = 180
+        ratio_weight = 0.2
+
+    if hstore > 84: height_weight = 0.3
+    else: height_weight = 0
+    
+    return ratio_weight, height_weight
+    
+def est_egomotion(sift_matches, InitialKeypoints, kp_comp_sift):    
+    Alist = []
+    Blist = []
+    for siftdat in sift_matches[:15]:
+        # retrieve data:
+        kp_retrieve = InitialKeypoints.keypoints
+        height_retrieve = InitialKeypoints.heights
+            
+        # calculate omnicam pixel positions using kp_retrieve
+        old_uc_w = (kp_retrieve[siftdat.queryIdx].pt[0])*np.pi/(4*180)
+        old_vc_w = (kp_retrieve[siftdat.queryIdx].pt[1])*300/360
+        old_uc =  old_vc_w*np.sin(old_uc_w) 
+        old_vc =  old_vc_w*np.cos(old_uc_w) 
+        h_pt = height_retrieve[siftdat.queryIdx]
+            
+        new_uc_w = (kp_comp_sift[siftdat.trainIdx].pt[0])*np.pi/(4*180)
+        new_vc_w = (kp_comp_sift[siftdat.trainIdx].pt[1])*300/360
+        new_uc =  new_vc_w*np.sin(new_uc_w) 
+        new_vc =  new_vc_w*np.cos(new_uc_w) 
+            
+        # create point-based matrices and append to existing structure 
+        Apoint = np.array([[old_uc, -old_vc, -1/h_pt, 0],[old_vc, old_uc, 0, -1/h_pt]])
+        Bpoint = np.array([new_uc, new_vc])
+
+        Alist.extend(Apoint,)
+        Blist.extend(Bpoint,)
+            
+    Alist = np.array(Alist)
+    Blist = np.array(Blist)
+    s_vec = np.dot(np.linalg.pinv(Alist), np.transpose(Blist))
+    Qmat = np.array([[s_vec[0], -s_vec[1]], [s_vec[1], s_vec[0]]])
+    U, s, V = np.linalg.svd(Qmat)
+    Rmat = np.dot(U, np.transpose(V))
+    rotation = np.arctan(Rmat[1,0]/Rmat[0,0])
+    transx = s_vec[2]
+    transy = s_vec[3]
+    
+    return rotation, transx, transy
     
 
-def probability_calculator(numblob, whratio):
-	retvec = np.array([0 0 ])
-	if numblob > 2: retvec[0] = 0.1
-	elif numblob > 1: retvec[0] = 0.2
-	else: retvec[0] = 0.3
+def dep_prob_calculator(numblob, whratio):
+
+    if numblob > 2: blob_prob = 0.1
+    elif numblob > 1: blob_prob = 0.2
+    else: blob_prob = 0.3
+
+    if whratio > 3: width_prob = 0.3
+    elif whratio > 2.8: width_prob = 0.2
+    else: width_prob = 0.1
+
+    retvec= np.array([blob_prob, width_prob])
+
+    return retvec
 	
-	if whratio > 3: retvec[1] = 0.3
-	elif whratio > 2.8: retvec[1] = 0.2
-	else: retvec[1] = 0.1
-	
-	return retvec
+def home_prob_calculator(numblob, blob_sizes, bthresh, filt_flag):
+    if numblob < 1:
+        blob_prob = 0.0
+	size_prob = 0.0
+
+    elif numblob < 2:
+        blob_prob = 0.1
+        if blob_sizes[0] > bthresh: size_prob = 0.2
+	else: size_prob = 0.0
+
+    else:
+        if filt_flag > 0: blob_prob = 0.3
+        else: blob_prob = 0.2
+
+        if (blob_sizes[0]>bthresh) and (blob_sizes[1]>bthresh): size_prob = 0.3
+        elif (blob_sizes[0] > bthresh): size_prob = 0.2
+        else: size_prob = 0.1
+
+    retvec = np.array([blob_prob, size_prob])
+    return retvec
+
 	
 def localisation_calculator(locvec, probmatrix):
     probvec = np.dot(probmatrix, locvec)
     probscalar = np.sum(probvec)
 
-	return probscalar
- 
+    return probscalar
+
 
 def omni_balance(cp, omni_frame, mask, l_green, u_green):
     # apply mask
@@ -187,47 +398,112 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
         return 0, 0, 0, dep_frame.frame.copy()
 
 
-def omni_home(cp, omni_frame, mask, l_red, u_red):
+def leaving_home(cp, omni_frame, wide_mask, l_red, u_red):
+    leave_frame = NavImage(omni_frame)
+    leave_frame.convertHsv()
+    leave_frame.hsvMask(l_red, u_red)
+    leave_frame.frame[wide_mask < 1] = 0
+    leave_frame.erodeMask(erode_kernel, 1)
+    leave_frame.dilateMask(dilate_kernel,1)
+
+    _, cnts, _ = cv2.findContours(leave_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)> 400]
+    cnts_sorted = sorted(cnts_lg, key=cv2.contourArea, reverse=True)
+    if len(cnts_lg)>1:
+        sumx = 0
+        for i in range(0,1):
+            M = cv2.moments(cnts_sorted[i])
+            cx = int(M['m01']/M['m00'])-cp[1]
+            sumx += cx
+
+        av_x = sumx/2
+
+    elif len(cnts_lg) == 1:
+        M =cv2.moments(cnts_sorted[0])
+        cx = int(M['m01']/M['m00']) - cp[1]
+        av_x = cx
+
+    else: av_x = cp[1]
+
+    if ( av_x - cp[1] > 0):
+        heading = 1
+
+    elif (av_x -  cp[1] < 0) :
+        heading = -1
+
+    else: heading = 0
+
+    return len(cnts_lg), heading, leave_frame.frame.copy()
+
+
+
+def omni_home(cp, omni_frame, front_mask, l_red, u_red, l_green, u_green):
+    # Matched filter: look for RGR stripes)
     back_frame = NavImage(omni_frame)
     back_frame.convertHsv()
+    home_im = back_frame.frame.copy()
+    home_frame = NavImage(home_im)
+
     back_frame.hsvMask(l_red, u_red)
-    back_frame.frame[mask < 1] = 0
+    back_frame.frame[front_mask < 1] = 0
+    
+    home_frame.hsvMask(l_green, u_green)
+    home_frame.frame[front_mask < 1] = 0
         
     # turn until we can see two contours in roughly the right position
     back_frame.erodeMask(erode_kernel,1)
     back_frame.dilateMask(dilate_kernel, 1)
         
     _, cnts, _ = cv2.findContours(back_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    _, cnts_g, _ = cv2.findContours(home_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
    
     if len(cnts) > 0:
-        cnts_lg = [c for c in cnts if cv2.contourArea(c)>100]
-   
+        cnts_lg = [c for c in cnts if cv2.contourArea(c)>200]
+        cnts_g_lg = [c for c in cnts if cv2.contourArea(c) > 400]
+        
         if len(cnts_lg)> 0 :
             sum_x = 0
             sum_y = 0
             cnt_sort = sorted(cnts_lg, key=cv2.contourArea, reverse=True)
+            gcnt_sort = sorted(cnts_g_lg, key=cv2.contourArea, reverse=True)
 
+            if (len(cnts_lg) > 1) and (len(cnts_g_lg) > 0):
+                Mz = cv2.moments(cnt_sort[0])
+                cx_z = int(Mz['m01']/Mz['m00']) - cp[1]
+                Mo = cv2.moments(cnt_sort[1])
+                cx_o = int(Mo['m01']/Mo['m00']) - cp[1]
+
+                Mg = cv2.moments(gcnt_sort[0])
+                cx_g = int(Mg['m01']/Mg['m00']) - cp[1]
+
+                if ((cx_g < cx_o) and (cx_g > cx_z)) or ((cx_g>cx_o) and (cx_g < cx_z)):
+                    home_flag = 1
+                else: home_flag = 0
+
+            else: home_flag = 0
+
+        
             for c in cnt_sort:
                 M = cv2.moments(c)
 
                 cy = int(M['m10']/M['m00']) - cp[0]
                 cx = int(M['m01']/M['m00']) - cp[1]
                 cent_ang = np.arctan2(cy,cx)
-                
+
                 dirvec = [np.sin(cent_ang), np.cos(cent_ang)]
                 sum_y += dirvec[0]
                 sum_x += dirvec[1]
-                
+
             heading_angle = np.arctan2(sum_y, sum_x)
             c_area_list = [cv2.contourArea(c) for c in cnt_sort]
 
-            return len(cnts_lg), heading_angle, c_area_list, back_frame.frame.copy()
+            return len(cnts_lg), heading_angle, c_area_list, home_flag, back_frame.frame.copy()
 
-        else: 
-            return 0,0,0,back_frame.frame.copy()
+        else:
+            return 0,0,0,0, back_frame.frame.copy()
 
     else:
-        return 0, 0, 0, back_frame.frame.copy()
+        return 0, 0, 0, 0, back_frame.frame.copy()
 
 
 def sim_mse(imA, imB):

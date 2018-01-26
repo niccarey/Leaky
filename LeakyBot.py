@@ -74,23 +74,23 @@ class LeakyBot(object):
 
     def on_exit_turning(self):
         # Pause briefly before transition
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         time.sleep(2)
 
     def on_enter_driving(self):
         print(self.state)
         self.direction = 'fwd'
-        self.set_motor_values(self.speed, self.speed)
+        self.auto_set_motor_values(self.speed, self.speed)
         self.driving_clock = time.time()
 
     def on_exit_driving(self):
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         
 
     def on_enter_sensing(self):
         print(self.state)
         # control the motors here.
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         self.sensing_clock = time.time()
         self.sensor_loop += 1
 
@@ -104,47 +104,35 @@ class LeakyBot(object):
             self.direction = 'revturn'
         elif self.direction == 'revturn':
             self.direction = 'turn'
-
-    def set_turn_status(self):
-        turn_dir = bool(random.getrandbits(1))
-        self.direction = 'revturn'
-        if turn_dir:
-            self.cam_flag = 1
-        else:
-            self.cam_flag = 0
-            
-        print("Turning direction: ", self.cam_flag)
-        self.set_motor_values(0,0)
-        time.sleep(2)
         
 
     def go_backwards(self, drive_time):
         store_direction = self.direction
         self.direction = 'rev'
-        self.set_motor_values(self.speed, self.speed)
+        self.auto_set_motor_values(self.speed, self.speed)
         time.sleep(drive_time)
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         self.direction = store_direction
     
     def generic_turn(self, drivetime):
         store_direction = self.direction
         self.direction = 'turn'
-        self.set_motor_values(self.speed, self.speed)
+        self.auto_set_motor_values(self.speed, self.speed)
         time.sleep(drivetime)
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         self.direction = store_direction
         
     def generic_rev_turn(self, drivetime):
         store_direction = self.direction
         self.direction = 'revturn'
-        self.set_motor_values(self.speed, self.speed)
+        self.auto_set_motor_values(self.speed, self.speed)
         time.sleep(drivetime)
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         self.direction = store_direction
     
     def on_enter_waiting(self):
         print(self.state)
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         
     
     def on_exit_waiting(self):
@@ -169,24 +157,24 @@ class LeakyBot(object):
     def on_exit_deposit(self):
         self.have_block = False
 
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         time.sleep(1.5)
             
         
     def on_enter_backup(self):
         print(self.state)
         self.direction = 'rev'
-        self.set_motor_values(self.speed, self.speed)
+        self.auto_set_motor_values(self.speed, self.speed)
         time.sleep(0.6)
         # different to a normal turn, so:
 
         self.direction = 'revturn'
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
 
             
     def on_exit_backup(self):
         self.direction = 'revturn' # this is redundant, surely?
-        self.set_motor_values(0,0)
+        self.auto_set_motor_values(0,0)
         time.sleep(2)
         
   
@@ -194,8 +182,21 @@ class LeakyBot(object):
         print("Now entering:" , self.state)
         self.high_humidity = True # probably not necessary but anyway
 
+
+    def set_motor_values(self, left_speed, right_speed, left_dir, right_dir):
+		# more directly controllable version of set motor values, requires
+		# knowledge of robot state as input - use when heading direction is
+		# fixed and known
+		ml = self.motor_left
+		mr = self.motor_right
+		ml.setSpeed(left_speed)
+		mr.setSpeed(right_speed)
+		ml.run(left_dir)
+		mr.run(right_dir)
+		
   
-    def set_motor_values(self, left_speed, right_speed):
+    def auto_set_motor_values(self, left_speed, right_speed):
+		# checks direction and sets eveyrthing automatically
         ml = self.motor_left
         mr = self.motor_right
         check_dir = self.direction
