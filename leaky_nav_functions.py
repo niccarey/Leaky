@@ -157,17 +157,19 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
     gray_frame = cv2.cvtColor(col_frame, cv2.COLOR_BGR2GRAY)
     unwrap_gray = unwarp(gray_frame, xmap, ymap)
     unwrap_col = unwarp(col_frame, xmap, ymap)    
-    home_frame = get_home_frame(l_red, u_red, col_frame)        
+
+    home_frame = get_home_frame(l_red, u_red, unwrap_col)
 
     wide_mask[gray_frame>230] = 0
     wide_erode = cv2.erode(wide_mask.astype(np.uint8), erode_kernel, iterations=1)
     mask_unwrap = unwarp(wide_erode, xmap, ymap)
-    
+
     _, cnts, _ = cv2.findContours(home_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts_lg = [c for c in cnts if cv2.contourArea(c)>300]
     xmin = 600
     xmax = 0
     ymin = 0
+    hstore = 300
     for c in cnts_lg:
         x, y, w, h = cv2.boundingRect(c)
         if y > ymin: 
@@ -190,7 +192,7 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
     tracking_mask = cv2.bitwise_and(mask_unwrap.astype(np.uint8), stripe_mask.astype(np.uint8))
     tracking_mask[tracking_mask>0] = 255
     
-    return cwidth, delta, hstore, tracking_mask, unwrap_gray
+    return cwidth, delta, hstore, tracking_mask, unwrap_gray, home_frame
     
 def keypoint_height_calc(IK, a0, a2, a3, a4, xS):    
     for kp_it in IK.keypoints:
@@ -264,40 +266,40 @@ def est_egomotion(sift_matches, InitialKeypoints, kp_comp_sift):
     return rotation, transx, transy
     
 
-def dep_prob_calculator(numblob, whratio):
+def dep_prob_calculator(numblob, whratio, minmax):
 
-    if numblob > 2: blob_prob = 0.1
-    elif numblob > 1: blob_prob = 0.2
-    else: blob_prob = 0.3
+    if numblob > 2: blob_prob = 0.2
+    elif numblob > 1: blob_prob = 0.3
+    else: blob_prob = 0.4
 
-    if whratio > 3: width_prob = 0.3
-    elif whratio > 2.8: width_prob = 0.2
+    if whratio > 1.5 or (min(minmax)<250) or (max(minmax)>500) : width_prob = 0.3
+    elif whratio > 1.3: width_prob = 0.2
     else: width_prob = 0.1
 
     retvec= np.array([blob_prob, width_prob])
 
     return retvec
 	
-def home_prob_calculator(numblob, blob_sizes, bthresh, filt_flag):
-    if numblob < 1:
-        blob_prob = 0.0
-	size_prob = 0.0
-
-    elif numblob < 2:
-        blob_prob = 0.1
-        if blob_sizes[0] > bthresh: size_prob = 0.2
-	else: size_prob = 0.0
-
-    else:
-        if filt_flag > 0: blob_prob = 0.3
-        else: blob_prob = 0.2
-
-        if (blob_sizes[0]>bthresh) and (blob_sizes[1]>bthresh): size_prob = 0.3
-        elif (blob_sizes[0] > bthresh): size_prob = 0.2
-        else: size_prob = 0.1
-
-    retvec = np.array([blob_prob, size_prob])
-    return retvec
+#def home_prob_calculator(numblob, blob_sizes, bthresh, filt_flag):
+#    if numblob < 1:
+#        blob_prob = 0.0
+#	size_prob = 0.0
+#
+#    elif numblob < 2:
+#        blob_prob = 0.1
+#        if blob_sizes[0] > bthresh: size_prob = 0.2
+#	else: size_prob = 0.0
+#
+#    else:
+#        if filt_flag > 0: blob_prob = 0.3
+#        else: blob_prob = 0.2
+#
+#        if (blob_sizes[0]>bthresh) and (blob_sizes[1]>bthresh): size_prob = 0.3
+#        elif (blob_sizes[0] > bthresh): size_prob = 0.2
+#        else: size_prob = 0.1
+#
+#    retvec = np.array([blob_prob, size_prob])
+#    return retvec
 
 	
 def localisation_calculator(locvec, probmatrix):
@@ -352,7 +354,7 @@ def omni_balance(cp, omni_frame, mask, l_green, u_green):
 
 
 
-def omni_deposit(cp, omni_frame, mask, l_green, u_green):
+def omni_deposit(cp, omni_frame, mask, l_green, u_green, xmap, ymap):
     dep_frame = NavImage(omni_frame)
     dep_frame.convertHsv()
     dep_frame.hsvMask(l_green, u_green)
@@ -361,41 +363,38 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green):
     # turn until we have one ROI of a sufficient size, with CoM within a central window
     dep_frame.dilateMask(dilate_kernel, 1)
     dep_frame.erodeMask(erode_kernel, 1)
-    dep_frame.dilateMask(dilate_kernel, 1)
+    dep_frame.dilateMask(dilate_kernel_big, 1)
 
-    _, cnts, _ = cv2.findContours(dep_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # problem is warp
+    dep_frame_unwarp = unwarp(dep_frame.frame.copy(), xmap, ymap)
+    _, cnts, _ = cv2.findContours(dep_frame_unwarp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
     # check how many segments larger than (threshold)
 
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-    cnts_lg = [c for c in cnts if cv2.contourArea(c)>800]
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)>1000]
 
-    if len(cnts_lg) > 0:
+    if len(cnts_lg) > 0: 
         rect = cv2.minAreaRect(cnts_lg[0])
+        box= np.int0(cv2.boxPoints(rect))
+        maxbox = max(box[:,0])
+        minbox = min(box[:,0])
         if (rect[2] > -45) and (rect[2] < 45):
             boxratio = rect[1][0]
             boxratio /= rect[1][1]
         else:
             boxratio = rect[1][1]
             boxratio /= rect[1][0]
-        #print("w/h ratio: ", boxratio, "angle: ", rect[2])
-        
-        #if (len(cnts_lg) > 1) or (boxratio < 2.52) :
-        #    #print("Keep turning, can see: ", len(cnts_lg))
-        #    return len(cnts_lg), 0, boxratio, dep_frame.frame.copy()
-        
         #else: # Ideally we would turn until wall and blob were merged, but this is hard to generalise
-        blob = cnts_lg[0]
-            
-        M = cv2.moments(blob)                
-        cy = int(M['m10']/M['m00']) - cp[0]
-        cx = int(M['m01']/M['m00']) - cp[1]
-        heading_angle = np.arctan2(cy,cx)
+           
+        M = cv2.moments(cnts_lg[0])                
+        cy = int(M['m10']/M['m00'])
+        heading_angle = (float(cy)/2)*np.pi/180
 
-        return len(cnts_lg), heading_angle, boxratio, dep_frame.frame.copy()
+        return len(cnts_lg), heading_angle, np.array([minbox, maxbox]), boxratio, dep_frame_unwarp
 
     else:
-        return 0, 0, 0, dep_frame.frame.copy()
+        return 0, 0, 0, 0, dep_frame.frame.copy()
 
 
 def leaving_home(cp, omni_frame, wide_mask, l_red, u_red):

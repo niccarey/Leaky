@@ -25,7 +25,7 @@ class LeakyBot(object):
         {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'},
         {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'},
         {'trigger': 'static_visuals', 'source': 'driving', 'dest': 'backup'},
-        {'trigger': 'static_visuals', 'source': 'turning', 'dest':'backup'}]
+        {'trigger': 'static_visuals', 'source': 'turning', 'dest':'backup', 'unless': 'do_high_humidity'}]
         
         
     start_turning_frame = 0
@@ -59,12 +59,11 @@ class LeakyBot(object):
     def set_probability(self, diagvec):
         self.probability = np.diagflat([diagvec])
 
-    def update_probability(self, addvec):
+    def update_probability(self, add_vec):
         prob_matrix = self.probability. astype(float)
         prob_vec = np.diagonal(prob_matrix).copy()
-        print( "debug: ", prob_vec, addvec)
-        
-        prob_vec += addvec.astype(float)
+        #print("debug: ", prob_vec, add_vec)
+        prob_vec += add_vec.astype(float)
         ret_matrix = np.diagflat([prob_vec])
 
         self.probability = ret_matrix
@@ -100,11 +99,18 @@ class LeakyBot(object):
 
     def set_turn_direction(self):
         # alternates directions to a) avoid dripper jam and b) hopefully keep block in place
-        if self.direction == 'turn':
-            self.direction = 'revturn'
-        elif self.direction == 'revturn':
-            self.direction = 'turn'
-        
+        if self.direction == 'turn': self.direction = 'revturn'
+        elif self.direction == 'revturn': self.direction = 'turn'
+
+    def set_turn_status(self):
+        turn_dir = bool(random.getrandbits(1))
+        self.direction = 'revturn'
+        if turn_dir: self.cam_flag = 1
+        else: self.cam_flag = 0
+             
+        print("Turning direction: ", self.cam_flag)
+        self.auto_set_motor_values(0,0)
+        time.sleep(1.5)
 
     def go_backwards(self, drive_time):
         store_direction = self.direction
@@ -221,21 +227,21 @@ class LeakyBot(object):
         elif check_dir == 'revturn':           
            if self.cam_flag:
                ml.setSpeed(int(float(right_speed)*1.2))
-               mr.setSpeed(int(float(right_speed)*0.5))
+               mr.setSpeed(int(float(right_speed)*0.3))
 
            else:
                mr.setSpeed(int(float(left_speed)*1.2))
-               ml.setSpeed(int(float(left_speed)*0.5))
+               ml.setSpeed(int(float(left_speed)*0.3))
 
            ml.run(Adafruit_MotorHAT.BACKWARD)
            mr.run(Adafruit_MotorHAT.BACKWARD)
 
         elif check_dir == 'turn':
            if self.cam_flag:
-               ml.setSpeed(int(float(right_speed)*0.5))
+               ml.setSpeed(int(float(right_speed)*0.3))
                mr.setSpeed(int(float(right_speed)*1.2))
            else:
-               mr.setSpeed(int(float(left_speed)*0.5))
+               mr.setSpeed(int(float(left_speed)*0.3))
                ml.setSpeed(int(float(left_speed)*1.2))
 
            ml.run(Adafruit_MotorHAT.FORWARD)
