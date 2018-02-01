@@ -96,6 +96,11 @@ def shutdownLeaky():
 
 atexit.register(shutdownLeaky)
 
+def imgsave(image_array, imname, fcount):
+    storeIm = Image.fromarray(image_array)
+    imname += str(fcount)
+    imname += '.jpg'
+    storeIm.save(imname)
 
 def main():
 
@@ -197,6 +202,9 @@ def main():
                 time.sleep(0.3)
                 if block_trigger > 0.02:
                     print("Triggered, " , block_trigger)
+                    # pick a random direction to start
+                    leaky1.cam_flag = bool(random.getrandbits(1))
+
                     leaky1.generic_rev_turn(0.12)
                     time.sleep(0.3)
                     leaky1.generic_turn(0.12)
@@ -224,15 +232,13 @@ def main():
         if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()):
             # -----------------------------------
             # Each loop, move in pre-set direction, then stop and sense
-            #print("moving, no sensors")
             leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
             time.sleep(0.1)
 
-            # Start sensing subloop
             leaky1.auto_set_motor_values(0,0)
-            #print("Entering sensor loop")
             start_time = time.time()
             # -----------------------------------
+
             if (leaky1.is_turning()):
                 # set direction
                 leaky1.set_turn_direction()
@@ -258,54 +264,14 @@ def main():
                     elif heading_angle < 0: leaky1.cam_flag = 0
                     else: print('no walls in view')
 
-                    #img = Image.fromarray(red_frame)
-                    #imname = './TestIm/LeavingHome_'
-                    #imname += str(fcount)
-                    #imname += '.png'
-                    #img.save(imname)
 
                 else: # we must be looking for a deposition spot
                     blob_num, heading_angle, maxminbox, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
-                    #rednum, _, _   = leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
-                    print(maxminbox)
                     if blob_num > 0 and ((min(maxminbox) < 250) or max(maxminbox > 500)):
                         print("Visual overlap. Moving to deposition")
                         leaky1.wall_found()
 
-                    #if (blob_num < 3) and ((heading_angle > 2.3) or (heading_angle < -2.3)) and rednum > 0:
-                    #    print("moving to deposition")
-                    #    leaky1.wall_found()
-
-                    # SET PROBABILITY
-                    #if blob_num > 0:
-                    #    print('checking deposition targets:', blob_num, heading_angle, diff_val)
-                    #    blob_vec = dep_prob_calculator(blob_num, box_ratio)
-                    #    probvec = np.diagonal([leaky1.probability]).copy()
-                    #    np.put(probvec,[0,1], blob_vec.astype(float))
-                    #    leaky1.set_probability([probvec]) # should only set the relevant diagonals
-
-                    #if diff_val < 80:
-                    #    simvec = np.array([0.0, 0, 0.1, 0, 0, 0])
-                    #else:
-                    #    simvec = np.zeros(6).astype(float)
-
-                    #try: leaky1.update_probability(simvec)
-                    #except: print("Similarity estimate not found, continuing ...")
-                    #deposit_prob = localisation_calculator(depvec, leaky1.probability)
-
-                    #print("location estimation: ", deposit_prob)
-
-                    #if deposit_prob > 0.8:
-                    #    leaky1.static_visuals()
-                    #    leaky1.set_probability([0.0,0,0,0,0,0.0]) # only sets deposition values
-
-                #img = Image.fromarray(omni_frame)
-                #imname = './TestIm/TurnForDepOutput_'
-                #imname += str(fcount)
-                #imname += '.jpg'
-                #img.save(imname)
-
-            elif leaky1.is_deposit():
+            elif leaky1.is_deposit(): # This won't guarantee the block is deposited on a wall, but it will try damn hard
                 try:
                     f1 = 180 - 1000*flex1.read()
                     f2 = 180 - 1000*flex2.read()
@@ -355,11 +321,6 @@ def main():
                 print('I think I am turning: ',leaky1.cam_flag, leaky1.direction, heading_angle, diff_val)
                 kill_count += 1
 
-                #img = Image.fromarray(show_frame)
-                #imname = './TestIm/DepOutput_'
-                #imname += str(fcount)
-                #imname += '.jpg'
-                #img.save(imname)
 
             elif (leaky1.is_backup()):
                 # we are just looking for rear wall, then we transition to homing algorithm
@@ -394,7 +355,7 @@ def main():
                 if h_store > 60: 
                     height_weight = 0.3
                     try: 
-                        f1 = 180-1000*flex1.read()
+                        f1 = 180 - 1000*flex1.read()
                         f2 = 180 - 1000*flex2.read()
                         if abs(f1) > 20 or abs(f2) > 20:
                             homing = False
@@ -407,13 +368,6 @@ def main():
 
                 kp_comp_sift, des_comp_sift = sift.detectAndCompute(unwrap_gray_comp, tracking_comp.astype(np.uint8))
                 imdisp = cv2.drawKeypoints(unwrap_gray_comp, kp_comp_sift, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-
-                #matchim = Image.fromarray(imdisp)
-                #imname = './TestIm/template_matching_'
-                #imname += str(hcount)
-                #imname += '.jpg'
-                #matchim.save(imname)
-                #hcount += 1
 
                 if (not (des_comp_sift is None)) :
                     sift_matches = bf.match(des_sift, des_comp_sift) 
@@ -450,13 +404,11 @@ def main():
                     weight_array = np.array([ratio_weight, height_weight, direction_weight])
 
                     if (np.sum(weight_array)> 0.5 and (ratio_weight >0 and height_weight>0)):
-                        leaky1.cam_flag = bool(random.getrandbits(1))
                         homing = False
                         leaky1.close_to_home()
              		                
                 else: 
                     print("cannot find relevant features, backing up")
-                    #leaky1.cam_flag = 1
                     leaky1.direction = 'revturn'
                     leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
                     time.sleep(0.1)
@@ -512,18 +464,12 @@ def main():
                         leaky1.humidity_maintained()
                 
                 else:
-                    #stdscr.addstr("no sensors available, starting again \n")
                     print("No sensors available, starting again")
                     leaky1.sensing_clock = time.time()
 
                 
 
         elif leaky1.is_driving():
-            #leaky1 = update_similarity(leaky1, diff_val)
-            #if leaky1.similarity > 5:
-            #    leaky1.static_visuals()
-            #    leaky1.similarity = 0
-
             if (time.time() - leaky1.driving_clock < 0.3):
                 time.sleep(0.1)
             

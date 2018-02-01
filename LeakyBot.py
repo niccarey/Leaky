@@ -1,4 +1,6 @@
-from transitions import Machine
+#from transitions import Machine
+from transitions.extensions import GraphMachine as Machine
+import os, sys, inspect, io
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
 import numpy as np
 import time
@@ -22,25 +24,18 @@ class LeakyBot(object):
         {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'conditions':'do_have_block', 'unless':'do_high_humidity'},
         {'trigger':'reached_wall', 'source':'deposit', 'dest':'backup'},
         {'trigger':'home_spotted', 'source':'backup', 'dest':'go_home', 'unless':'do_have_block'},
-        {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'},
-        {'trigger':'button_push', 'source':'go_home', 'dest':'waiting'},
-        {'trigger': 'static_visuals', 'source': 'driving', 'dest': 'backup'},
-        {'trigger': 'static_visuals', 'source': 'turning', 'dest':'backup', 'unless': 'do_high_humidity'}]
-        
-        
-    start_turning_frame = 0
-    
+        {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'}]
+            
     
     def __init__(self, motor_left, motor_right):
         # uniform initialization functions
-        self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting')
+        self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting', show_auto_transitions=False)
         self.direction = 'fwd' 
         self.probability = np.zeros((6,6)) 
         
         # attach motors to object
         self.motor_left = motor_left
         self.motor_right = motor_right
-        #self.get_graph().draw('state_diagram.png', prog='dot')
         
         self.driving_clock = 0
         self.sensing_clock = 0
@@ -62,7 +57,6 @@ class LeakyBot(object):
     def update_probability(self, add_vec):
         prob_matrix = self.probability. astype(float)
         prob_vec = np.diagonal(prob_matrix).copy()
-        #print("debug: ", prob_vec, add_vec)
         prob_vec += add_vec.astype(float)
         ret_matrix = np.diagflat([prob_vec])
 
@@ -145,14 +139,7 @@ class LeakyBot(object):
         time.sleep(2)
         self.have_block = True
         self.high_humidity = True
-        self.start_turning_frame = 0
         
-        turn_dir = bool(random.getrandbits(1))
-        if turn_dir:
-            self.cam_flag = 1
-        else:
-            self.cam_flag = 0
-
         self.direction = 'turn'
 
         
@@ -207,7 +194,6 @@ class LeakyBot(object):
         mr = self.motor_right
         check_dir = self.direction
         
-        #ml.setSpeed(int(float(left_speed)*1.2))
         ml.setSpeed(left_speed)
         mr.setSpeed(right_speed)
 
@@ -247,21 +233,11 @@ class LeakyBot(object):
            ml.run(Adafruit_MotorHAT.FORWARD)
            mr.run(Adafruit_MotorHAT.FORWARD)
 
-        #elif check_dir == 'left':
-           
-        #    ml.run(Adafruit_MotorHAT.BACKWARD)
-        #    mr.run(Adafruit_MotorHAT.FORWARD)
-
-        #elif check_dir == 'right':
-        #    ml.run(Adafruit_MotorHAT.FORWARD)
-        #    mr.run(Adafruit_MotorHAT.BACKWARD)
-            
         else: 
             ml.run(Adafruit_MotorHAT.FORWARD)
             mr.run(Adafruit_MotorHAT.FORWARD)
             
-        
-            
+             
         
     def have_block(self):
         print(self.have_block)
@@ -269,6 +245,3 @@ class LeakyBot(object):
         
     def high_humidity(self):
         return self.high_humidity
-        
-        
-
