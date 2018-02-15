@@ -53,7 +53,6 @@ print("Setting up filtering constants")
 erode_kernel = np.ones((5,5), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
 
-
 # Define omnicam masks:
 # ----------------------------------------------------------------------
 cp = [ 300, 300 ]
@@ -63,32 +62,31 @@ r_norim = 295;
 
 y_crop_min = 320
 y_crop_max = 920
-
 x_crop_min = 530
 x_crop_max = 1130
 
-poly_front = np.array([cp, [1, 20], [1,1], [600,1], [600,20]])
+poly_front = np.array([cp, [20, 1], [600,1]])
 poly_back = np.array([cp, [1, 430],[1, 600], [600,600], [600,430]])
 poly_left = np.array([cp, [180, 1], [1, 1],[1, 600]])
 poly_right = np.array([cp, [600, 1], [600 ,1], [600, 430]])
-
 # ----------------------------------------------------------------------
 sides_mask, front_mask, wide_mask = define_masks([600, 600], cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
 
 # ----------------------------------------------------------------------
-lg_bound = 50
-ug_bound = 77
+lg_bound = 60
+ug_bound = 85
 
 lr_bound = 0
-ur_bound = 13
+ur_bound = 20
 
 # Initial guesses for filters (overwritten later, can probably delete)
 l_green = np.array([40, 60, 0])
 u_green = np.array([90, 255, 255])
 l_red = np.array([0, 80, 50])
 u_red = np.array([20, 255, 255])
-omni_frame = np.zeros((600,600,3))
+omni_frame = np.zeros((600,800,3))
 # ----------------------------------------------------------------------
+
 
 # shuts down motors and cameras on program exit, cleans up terminal
 def shutdownLeaky():
@@ -105,26 +103,11 @@ def imgsave(image_array, imname, fcount):
     imname += '.jpg'
     storeIm.save(imname)
 
-def flex_sensor_calib(flex1, flex2, vcc):
-    flexcount = 0
-    f1s = 0
-    f2s = 0
-
-    while (flexcount < 10):
-        time.sleep(0.3)
-        f1v = flex1.read()*vcc
-        f2v = flex2.read()*vcc
-        f1s += f1v
-        f2s += f2v
-        flexcount += 1
-
-    return f1s/10, f2s/10
-
-
 def main():
+
     print("Leaky started ")
 
-    #global cX, cY
+    global cX, cY
 
     # Initialise cameras - hold auto white balance constant to improve filtering
     print("Setting camera gains and white balance ")
@@ -133,13 +116,9 @@ def main():
     picam.camera.awb_gains = camgain
 
     # Set Arduino pressure sensor pin
-    print("Setting up flex sensors")
     block_pin = board.get_pin('a:1:i')
     flex1 = board.get_pin('a:0:i')
     flex2 = board.get_pin('a:2:i')
-    vcc = 3.3
-    f1_av, f2_av = flex_sensor_calib(flex1, flex2, vcc)
-    print("Whiskers: ", f1_av, f2_av)
 
     print("Establishing humidity sensing GPIO settings ")
     # Set up humidity sensing
@@ -160,12 +139,12 @@ def main():
     depvec = np.array([1.0, 1.0, 1.0, 1.0, 0, 0])
     homevec = np.array([0,0,0,0,1.0,1.0])
 
-    hum_threshold = 65
+    hum_threshold = 68
 
     # Set up motors
     print("Setting motor parameters")
     leaky1 = LeakyBot(myMotor1, myMotor2)
-    leaky1.speed = 170
+    leaky1.speed = 160
     leaky1.direction = 'fwd'
 
     print("Setting up homing system")
@@ -176,9 +155,9 @@ def main():
     init_crop = init_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
     # update boundary functions (assumes we have some blocks visible)
     print("Identify green peak:")
-    l_green, u_green = boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 30, 255, 0, 255, 20)
+    l_green, u_green = boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 50, 255, 0, 255, 20)
     print("Identify red peak:")
-    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 90, 255, 180, 240, 10)
+    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 90, 255, 180, 250, 10)
     print(" ... setting up unwarp map ...")
     xmap, ymap = buildMap(600,600, 720, 360, 300, cp[0], cp[1])
     print("...done")
@@ -214,14 +193,10 @@ def main():
     winset = 0
 
     print("Waiting for block ...")
-    #dataname = './TestIm/130218_1.txt'
-    #datfile = open(dataname,'w')
-    #datfile.write('Starting Leaky ...')
-    #datfile.close()
     while running:
 
         # check for button pushes
-        if leaky1.is_waiting() or leaky1.is_deposit() or leaky1.is_turning() or leaky1.is_driving():
+        if leaky1.is_waiting() or leaky1.is_deposit() or leaky1.is_turning():
             try:
                 block_trigger = block_pin.read()
                 time.sleep(0.3)
@@ -243,7 +218,7 @@ def main():
         
         # get camera frames
         full_frame = picam.read()
-        omni_frame = full_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
+        omni_frame = full_frame[367:967, 536:1136,:]
         save_frame = omni_frame.copy()
 
         try: prev_frame
@@ -270,17 +245,17 @@ def main():
 
                 # we are either a) looking for wall balancing or b)looking to deposit
                 if leaky1.high_humidity:
-                    print("Balancing walls: ") # this is a bit janky - we end up with a strong bias
-
+                    print("Balancing walls: ")
                     heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
                     rednum, red_head, red_frame = leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
-                    imgsave(show_frame, './TestIm/balance_frame_', fcount)
-                    imgsave(red_frame, './TestIm/leaving_red_bars_', fcount)
+                    imgsave(red_frame, './TestIm/red_bars_', fcount)
+                    imgsave(omni_frame, './TestIm/FullView_', fcount)
                     # ---------------------------------
                     # make sure we cannot see home base, try to balance walls
+                    print("Can see red bars: ", rednum)
                     if rednum > 0:
-                        print("Can see red bars: ", rednum)
-                        #just keep turning
+                        if red_head > 0: leaky1.cam_flag = 1
+                        else: leaky1.cam_flag = 0
 
                     elif (heading_angle > 2.75) or (heading_angle < -2.75) :
                         print('walls balanced!')
@@ -288,35 +263,29 @@ def main():
 
                     elif heading_angle > 0: leaky1.cam_flag = 1
                     elif heading_angle < 0: leaky1.cam_flag = 0
-
                     else: print('no walls in view')
 
 
                 else: # we must be looking for a deposition spot
                     blob_num, heading_angle, maxminbox, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
-                    imgsave(show_frame, './TestIm/green_depo_seek', fcount)
-
                     if blob_num > 0 and ((min(maxminbox) < 250) or max(maxminbox > 500)):
                         print("Visual overlap. Moving to deposition")
                         leaky1.wall_found()
 
             elif leaky1.is_deposit(): # This won't guarantee the block is deposited on a wall, but it will try damn hard
                 try:
-                    f1 = 150*(flex1.read()*vcc -f1_av)
-                    f2 = 100*(flex2.read()*vcc -f2_av)
-
+                    f1 = 180 - 1000*flex1.read()
+                    f2 = 180 - 1000*flex2.read()
                     print("bend sensing: ", f1, f2)
 
-                    if abs(f1) >10 or abs(f2) > 10:
+                    if abs(f1) >25 or abs(f2) > 25:
                         kill_count = 0
                         leaky1.set_probability([0.0,0,0,0,0.0, 0.0])
                         leaky1.reached_wall()
                         continue
 
                 except: print("No data from flex sensors")
-
                 blob_num, heading_angle, minmaxbox, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
-                imgsave(show_frame, './TestIm/green_depo_', fcount)
 
                 # SET PROBABILITY
                 if blob_num > 0:
@@ -326,7 +295,7 @@ def main():
                     leaky1.set_probability([probvec])
 
                 deposit_prob = localisation_calculator(depvec, leaky1.probability)
-                print("green blobs, location estimation, box_ratio: ", blob_num,  deposit_prob, box_ratio)
+                print("green blobs, location estimation: ", blob_num,  deposit_prob)
 
                 if (deposit_prob > 0.8) or (kill_count > 30): 
                     kill_count = 0
@@ -378,32 +347,26 @@ def main():
                 compare_im = read_im[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
 
                 c_width, delta, h_store, tracking_comp, unwrap_gray_comp, home_check = run_tracking_mask(xmap, ymap, l_red, u_red, compare_im.copy(), wide_mask.copy(), o_width)
-                imgsave(home_check, './TestIm/homing_check_', hcount)
-
-                # some utter turtle crap happening here                
-                if h_store > 40:
+		imgsave(home_check, './TestIm/homing_check_', fcount)
+    
+                if h_store > 65:
                     height_weight = 0.3
-                elif h_store > 30:
-                    height_weight = 0.1
+
+                try:
+                    f1 = 180 - 1000*flex1.read()
+                    f2 = 180 - 1000*flex2.read()
+                    if abs(f1) > 25 or abs(f2) > 25:
+                        homing = False
+                        leaky1.close_to_home()
+                        continue
+                    
+                except: print("No info from bend sensors")
 
                 else: height_weight = 0
 
-                if height_weight>0:
-                    try:
-                        f1 = 150*(flex1.read()*vcc -f1_av)
-                        f2 = 100*(flex2.read()*vcc -f2_av)
-
-                        if abs(f1) > 20 or abs(f2) > 20:
-                            print("sensor bend trigger: ", f1, f2)
-                            homing = False
-                            leaky1.close_to_home()
-                            continue
-                    
-                    except: print("No info from bend sensors")
-
                 kp_comp_sift, des_comp_sift = sift.detectAndCompute(unwrap_gray_comp, tracking_comp.astype(np.uint8))
                 imdisp = cv2.drawKeypoints(unwrap_gray_comp, kp_comp_sift, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-                imgsave(imdisp, './TestIm/HomingView_', hcount)
+                imgsave(imdisp, 'HomingView_', fcount)
                 if (not (des_comp_sift is None)) :
                     sift_matches = bf.match(des_sift, des_comp_sift) 
                     sift_matches = sorted(sift_matches, key= lambda x:x.distance)
@@ -449,8 +412,7 @@ def main():
                     time.sleep(0.1)
                     leaky1.auto_set_motor_values(0,0)
         
-                hcount += 1
-        
+
         if winset:
             cv2.imshow("Camera view", show_frame)
             key = cv2.waitKey(1) & 0xFF                
@@ -458,7 +420,6 @@ def main():
                         
         # CHECK HUMIDITY DATA        
         if leaky1.is_sensing():
-            #datfile = open(dataname, 'a')
             if (time.time() - leaky1.sensing_clock < 30):
                 time.sleep(0.1)
 
@@ -481,8 +442,6 @@ def main():
                         temp_new = sens_i.read_t()
                         hum_new = sens_i.read_rh()
                         print("Final read: ", int(temp_new), int(hum_new))
-                        #datfile.write('\n' + 'Sensing: ' + time.time())
-                        #datfile.write('\n' + 'sensor' + hum_count + ' ' + int(temp_new) +' '+ int(hum_new))
                         hum_sum = hum_sum + hum_new
                         hum_count += 1
                         
@@ -506,7 +465,7 @@ def main():
                     print("No sensors available, starting again")
                     leaky1.sensing_clock = time.time()
 
-            #datfile.close()
+                
 
         elif leaky1.is_driving():
             if (time.time() - leaky1.driving_clock < 0.2):

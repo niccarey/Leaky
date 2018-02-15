@@ -16,6 +16,7 @@ class LeakyBot(object):
     
     transitions = [ {'trigger':'button_push', 'source':'waiting', 'dest':'turning'},
         {'trigger':'button_push', 'source':'deposit', 'dest':'backup'},
+        {'trigger':'button_push', 'source':'driving', 'dest':'deposit'},
         {'trigger':'button_push', 'source':'turning', 'dest':'backup', 'unless':'do_high_humidity'},
         {'trigger':'walls_balanced', 'source':'turning', 'dest':'sensing', 'prepare':'set_loop', 'conditions':['do_have_block', 'do_high_humidity']}, 
         {'trigger':'humidity_maintained', 'source': 'sensing', 'dest':'driving', 'conditions':'do_high_humidity'},
@@ -177,19 +178,19 @@ class LeakyBot(object):
 
 
     def set_motor_values(self, left_speed, right_speed, left_dir, right_dir):
-		# more directly controllable version of set motor values, requires
-		# knowledge of robot state as input - use when heading direction is
-		# fixed and known
-		ml = self.motor_left
-		mr = self.motor_right
-		ml.setSpeed(left_speed)
-		mr.setSpeed(right_speed)
-		ml.run(left_dir)
-		mr.run(right_dir)
+	# more directly controllable version of set motor values, requires
+	# knowledge of robot state as input - use when heading direction is
+	# fixed and known
+	ml = self.motor_left
+	mr = self.motor_right
+	ml.setSpeed(left_speed)
+	mr.setSpeed(right_speed)
+	ml.run(left_dir)
+	mr.run(right_dir)
 		
   
     def auto_set_motor_values(self, left_speed, right_speed):
-		# checks direction and sets eveyrthing automatically
+	# checks direction and sets eveyrthing automatically
         ml = self.motor_left
         mr = self.motor_right
         check_dir = self.direction

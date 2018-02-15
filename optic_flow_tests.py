@@ -115,7 +115,7 @@ mask_unwrap = unwarp(init_mask_erode, xmap, ymap)
 lr_bound = 5
 ur_bound = 25
 
-l_red, u_red = boundary_estimate(unwrap_base, lr_bound, ur_bound, 100, 255, 80, 255, 15)
+l_red, u_red = boundary_estimate(unwrap_base, lr_bound, ur_bound, 100, 255, 100, 255, 15)
 
 redframe = NavImage(unwrap_base.copy())
 redframe.convertHsv()
@@ -154,7 +154,7 @@ a0 = -188.44
 a2 = 0.0072
 a3 = -0.0000374
 a4 = 0.0000000887
-xS = 155
+xS = 105
 
 print("Establishing feature locations ...")
 
@@ -190,6 +190,7 @@ running = True
 leaky1.cam_flag = 1 # redundant, but wev
 fcount = 1
 direction_weight = 0
+ratio_weight = 0
 
 while running:
     read_im = picam.read()
@@ -197,7 +198,7 @@ while running:
     #img = Image.fromarray(compare_im)
     imname = './SIFT_testing/check_homing'
     imname += str(fcount)
-    imname += '.png'
+    imname += '.jpg'
     #img.save(imname)
     fcount += 1
     comp_gray = cv2.cvtColor(compare_im, cv2.COLOR_BGR2GRAY)
@@ -231,11 +232,16 @@ while running:
     if delta < 1:
         ratio_weight = 0
         smask_y = int(delta*180)
-    else: 
+    elif ratio_weight > 0.2: 
+        smask_y = 180
+        ratio_weight = ratio_weight
+    else:
         smask_y = 180
         ratio_weight = 0.2
 
-    if hstore > 84: height_weight = 0.3
+    if delta > 1: ratio_weight += 0.1
+
+    if hstore > 60: height_weight = 0.3
     else: height_weight = 0
 
     print(delta, hstore)
@@ -252,7 +258,7 @@ while running:
     img.save(imname)
     checktime = time.time()
     kp_comp_sift, des_comp_sift = sift.detectAndCompute(comp_gray_unwrap, tracking_mask.astype(np.uint8))
-    print(time.time() - checktime)
+    #print(time.time() - checktime)
 
     if (not (des_comp_sift is None)) :
         sift_matches = bf.match(des_sift, des_comp_sift) 
@@ -332,7 +338,7 @@ while running:
         print("Weightings: ", ratio_weight, height_weight, direction_weight)
         weight_array = np.array([ratio_weight, height_weight, direction_weight])
 
-        if (np.sum(weight_array)> 0.5 and (ratio_weight >0 and height_weight>0)) or delta > 2:
+        if (np.sum(weight_array)> 0.5 and (ratio_weight >0 and height_weight>0)):
             print("Think I'm home")
             running = False
         

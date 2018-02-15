@@ -24,15 +24,15 @@ r_out = 298;
 r_inner = 145;
 r_norim = 260;
 
-poly_front = np.array([cp, [20, 1], [600,1]])
-poly_back = np.array([cp, [1, 600], [600,600], [600,430]])
+poly_front = np.array([cp, [1,20], [1, 1], [600,1], [600,20]])
+poly_back = np.array([cp, [1, 430], [1,600], [600,600], [600,430]])
 poly_left = np.array([cp, [180, 1], [1, 1],[1, 600]])
 poly_right = np.array([cp, [600, 1], [600 ,1], [600, 430]])
 
 sides_mask, front_mask, wide_mask = define_masks([600,600], cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
 
-lg_bound = 60
-ug_bound = 110
+lg_bound = 50
+ug_bound = 70
 picam = VideoStream(usePiCamera=True, resolution=(1648,1232)).start()
 
 time.sleep(0.5)
@@ -61,10 +61,10 @@ histmax = np.argmax(hist)
 #b,g,r = cv2.split(init_crop)
 #new_im = cv2.merge([r,g,b])
 
-l_green, u_green = boundary_estimate(init_crop, lg_bound, ug_bound)
+l_green, u_green = boundary_estimate(init_crop, lg_bound, ug_bound, 50,255,0,255,20)
 
-l_red = np.array([histmax - 20, 40,50])
-u_red = np.array([histmax+20, 255, 255])
+l_red = np.array([min(histmax - 10,0), 90,180])
+u_red = np.array([histmax+10, 255, 250])
 
 running = True
 
@@ -73,25 +73,28 @@ fcount = 1
 while running:
     frame = picam.read()
     omni_frame = frame[360:960, 532:1132, :]
-    #heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
-    dcare1, dcare2, show_frame = omni_deposit(cp, omni_frame,wide_mask, l_green, u_green) 
-    #red_locs, heading_angle, red_sizes, red_frame = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
+    threadtest = time.time()
+    heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
+    #dcare1, dcare2, show_frame = omni_deposit(cp, omni_frame,wide_mask, l_green, u_green) 
+    #red_locs, red_frame = omni_home(cp, omni_frame, wide_mask, l_red, u_red)
+    #print(time.time() - threadtest)
     #redImage = NavImage(omni_frame)
     #redImage.convertHsv()
     #redImage.hsvMask(l_red, u_red)
     #cv2.imshow('Checking output', show_frame)
 
-    key = cv2.waitKey(1) & 0xFF
+    #key = cv2.waitKey(1) & 0xFF
 
-    if key == ord("q"):
-        running = False
-        break
+    #if key == ord("q"):
+    #    running = False
+    #    break
 
-    img = Image.fromarray(show_frame)
-    imname = './TestIm/GreenOutput_'
-    imname += str(fcount)
-    imname += '.png'
-    img.save(imname)
+    if fcount%10 < 1:
+        img = Image.fromarray(show_frame)
+        imname = './TestIm/GreenOutput_'
+        imname += str(fcount)
+        imname += '.jpg'
+        img.save(imname)
 
     fcount += 1
 

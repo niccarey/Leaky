@@ -107,12 +107,13 @@ fcount = 1
 
 while running:
     frame = picam.read()
-    #key = cv2.waitKey(1) & 0xFF
+    key = cv2.waitKey(1) & 0xFF
     
     # need to crop!!! check harvard thing for cropping info (!)
     cropped_frame = np.zeros((600,800,3))
     cropped_frame = frame[196:796, 432:1232,:]
-    #cv2.imshow("Check output", cropped_frame)
+    cv2.imshow("Check output", cropped_frame)
+    
     if depart_flag:
         # apply mask
         bal_frame = NavImage(cropped_frame)
@@ -165,14 +166,14 @@ while running:
                 print('left!')
 
             else:
-                print('right!')
+                print('right!')#
 
         #cv2.imshow("check mask", show_frame)
-        img = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
-        imname = './TestIm/CamOutput_'
-        imname += str(fcount)
-        imname += '.png'
-        img.save(imname)
+        #img = Image.fromarray(cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB))
+        #imname = './TestIm/CamOutput_'
+        #imname += str(fcount)
+        #imname += '.png'
+        #img.save(imname)
 
         fcount += 1
 
@@ -264,16 +265,16 @@ while running:
                 print("home spotted! Steer as normal", heading_angle*180/np.pi)
 
         #cv2.imshow("Mask testing", show_frame)
-        img = Image.fromarray(show_frame)
-        imname = './TestIm/BackupTest_'
-        imname += str(fcount)
-        imname += '.png'
-        img.save(imname)
+        #img = Image.fromarray(show_frame)
+        #imname = './TestIm/BackupTest_'
+        #imname += str(fcount)
+        #imname += '.png'
+        #img.save(imname)
         fcount += 1
 
 
-    #if key == ord("q"):
-    #    running=False
-    #    break
+    if key == ord("q"):
+        running=False
+        break
 
 

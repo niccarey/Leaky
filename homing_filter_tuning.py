@@ -68,7 +68,7 @@ fcount = 1
 print("Ready to record ")
 while running:
     frame = picam.read()
-    omni_frame = frame[328:928, 530:1130,:]
+    omni_frame = frame[320:920, 530:1130,:]
 
     # filter the image with these limit
     #homing_frame = NavImage(omni_frame.copy())
@@ -110,9 +110,9 @@ while running:
     key = cv2.waitKey(1) & 0xFF
     #cv2.imshow("Visualisation", unwarp_col)
 
-    #if fcount%10 < 1:  #key == ord("a"):
+    if fcount%10 < 1:  #key == ord("a"):
     #    imgsave(unwarp_col, './TestIm/Turn2Dep_test__', fcount)
-        #imgsave(homing_frame.frame, './TestIm/homeRed_', fcount)
+        imgsave(omni_frame, './TestIm/testingCrop_', fcount)
         #imgsave(dep_frame_unwarp, './TestIm/homeGreen_', fcount)
 
     fcount += 1

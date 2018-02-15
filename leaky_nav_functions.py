@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image # can remove this after debug
 
 
-erode_kernel = np.ones((5,5), np.uint8)
+erode_kernel = np.ones((7,7), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
 
 dilate_kernel_big = np.ones((11,11), np.uint8)
@@ -22,7 +22,6 @@ def define_masks(imshape, cp, r_out, r_inner, r_norim, poly_front, poly_back, po
     outer_mask = np.zeros((ypix,xpix))
     omask_px = (x-cp[0])**2 + (y-cp[1])**2 <= r_out**2
     outer_mask[omask_px] = 1
-
 
     inner_mask = np.zeros((ypix,xpix))
     imask_px = (x-cp[0])**2 + (y-cp[1])**2 <= r_inner**2
@@ -184,7 +183,7 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
 
     if delta < 1:
         smask_y = int(delta*180)
-    else: 
+    else:
         smask_y = 180
 
     stripe_mask = get_striped_mask(cwidth, smask_y, ymin, xmin, xmax, mask_unwrap.shape)
@@ -375,6 +374,25 @@ def omni_deposit(cp, omni_frame, mask, l_green, u_green, xmap, ymap):
     else:
         return 0, 0, 0, 0, dep_frame.frame.copy()
 
+def omni_home(cp, omni_frame, mask, l_red, u_red):
+    back_frame = NavImage(omni_frame)
+    back_frame.convertHsv()
+    back_frame.hsvMask(l_red, u_red)
+    back_frame.frame[mask<1] = 0
+
+    back_frame.erodeMask(erode_kernel, 1)
+    back_frame.dilateMask(dilate_kernel,1)
+    _, cnts, _ = cv2.findContours(back_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if len(cnts) > 0:
+        cnts_lg = [c for c in cnts if cv2.contourArea(c)> 100]
+
+        if len(cnts_lg) > 0:
+            return len(cnts_lg), back_frame.frame.copy()
+
+        else: return 0,back_frame.frame.copy()
+
+    else: return 0,back_frame.frame.copy()
 
 def leaving_home(cp, omni_frame, wide_mask, l_red, u_red):
     leave_frame = NavImage(omni_frame)
@@ -385,33 +403,23 @@ def leaving_home(cp, omni_frame, wide_mask, l_red, u_red):
     leave_frame.dilateMask(dilate_kernel,1)
 
     _, cnts, _ = cv2.findContours(leave_frame.frame.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts_lg = [c for c in cnts if cv2.contourArea(c)> 400]
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)> 900]
     cnts_sorted = sorted(cnts_lg, key=cv2.contourArea, reverse=True)
     if len(cnts_lg)>1:
         sumx = 0
         for i in range(0,1):
             M = cv2.moments(cnts_sorted[i])
             cx = int(M['m01']/M['m00'])-cp[1]
+            print(cx)
             sumx += cx
-
-        av_x = sumx/2
 
     elif len(cnts_lg) == 1:
         M =cv2.moments(cnts_sorted[0])
         cx = int(M['m01']/M['m00']) - cp[1]
-        av_x = cx
 
-    else: av_x = cp[1]
+    else: cx = cp[1]
 
-    if ( av_x - cp[1] > 0):
-        heading = 1
-
-    elif (av_x -  cp[1] < 0) :
-        heading = -1
-
-    else: heading = 0
-
-    return len(cnts_lg), heading, leave_frame.frame.copy()
+    return len(cnts_lg), (cx - cp[1]), leave_frame.frame.copy()
 
 
 
