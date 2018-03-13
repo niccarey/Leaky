@@ -22,8 +22,8 @@ def flex_sensor_calib(flexpin1, flexpin2, vcc):
     f2_sum = 0
     while flexcount < 10:
         time.sleep(0.3)
-        f1_v = flexpin1.read()*vcc
-        f2_v = flexpin2.read()*vcc
+        f1_v = flexpin1.read()*VCC
+        f2_v = flexpin2.read()*VCC
         print(f1_v, f2_v)
         f1_sum += f1_v
         f2_sum += f2_v
@@ -37,11 +37,14 @@ f1_av, f2_av = flex_sensor_calib(flex1, flex2, VCC)
 print('Average mean values:', f1_av, f2_av)
 
 fcount = 0
-while fcount < 50:
-    time.sleep(0.3)
-    f1_reading =150*( flex1.read()*VCC - f1_av)
-    f2_reading = flex2.read()*VCC*100 - f2_av*100
-
-    print("normalized readings: ", f1_reading, f2_reading)
-    fcount += 1
+stime = time.time()
+with open("test_write.txt", "a") as storefile:
+    while fcount < 20:
+        time.sleep(0.3)
+        f1_reading =150*( flex1.read()*VCC - f1_av)
+        f2_reading = 100*( flex2.read()*VCC - f2_av)
+        storefile.write(str(time.time()-stime) + " Sensors: " +str(f1_reading) +", " + str(f2_reading) + "\n")
+        fcount += 1
+        
+        
 

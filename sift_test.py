@@ -151,7 +151,7 @@ cv2.destroyAllWindows()
 
 # Brute force matching:
 # knn not great. FLANN may be faster, but same issues
-#bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
 
 FLANN_INDEX_KDTREE=1
 index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
@@ -208,17 +208,17 @@ for file in files("."):
     
     kp_comp_surf, des_comp_surf = surf.detectAndCompute(comp_gray_unwrap, tracking_mask.astype(np.uint8))
     kp_comp_sift, des_comp_sift = sift.detectAndCompute(comp_gray_unwrap, tracking_mask.astype(np.uint8))
-    
-    
+        
     if (not (des_comp_surf is None)) :
-    #    surf_matches = bf.match(des_surf, des_comp_surf) #.astype(np.uint32), des_comp.astype(np.uint32))
-        surf_matches = flann.knnMatch(des_surf, des_comp_surf, k=2)
-        surf_matchesMask = [[0,0] for i in xrange(len(surf_matches))]
-        for i, (m,n) in enumerate(surf_matches):
-            if m.distance < 0.7*n.distance:
-                surf_matchesMask[i] = [1,0]
+        surf_matches = bf.match(des_surf, des_comp_surf) #.astype(np.uint32), des_comp.astype(np.uint32))
+        #surf_matches = flann.knnMatch(des_surf, des_comp_surf, k=2)
+        #surf_matchesMask = [[0,0] for i in xrange(len(surf_matches))]
+        #for i, (m,n) in enumerate(surf_matches):
+        #    if m.distance < 0.7*n.distance:
+        #        surf_matchesMask[i] = [1,0]
+        surf_matches = sorted(surf_matches, key= lambda x:x.distance)
             
-        draw_surf_params = dict(matchColor = color[np.random.randint(0,100)], singlePointColor = (255,0,255), matchesMask = surf_matchesMask, flags = 0)
+        #draw_surf_params = dict(matchColor = color[np.random.randint(0,100)], singlePointColor = (255,0,255), matchesMask = surf_matchesMask, flags = 0)
     
     # BF knn matching
     #blue_matches = bf.knnMatch(des_blue.astype(np.uint8), des_comp_b.astype(np.uint8), k=2)
@@ -233,11 +233,10 @@ for file in files("."):
     #    if m.distance < 0.75*n.distance :
     #        good.append([m])
             
-        #surf_matches = sorted(surf_matches, key= lambda x:x.distance)
                 
-        #match_image = cv2.drawMatches(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches[:20], None, flags=2)
+        match_image = cv2.drawMatches(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches[:20], None, flags=2)
         #match_image = cv2.drawMatchesKnn(baseim, kp, compare_im, kp_comp, good, None, flags=2)
-        match_image = cv2.drawMatchesKnn(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches, None, **draw_surf_params)
+        #match_image = cv2.drawMatchesKnn(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches, None, **draw_surf_params)
 
         cv2.imshow('check match', match_image)
         cv2.waitKey(0)

@@ -225,11 +225,11 @@ class LeakyBot(object):
 
         elif check_dir == 'turn':
            if self.cam_flag:
-               ml.setSpeed(int(float(right_speed)*0.3))
-               mr.setSpeed(int(float(right_speed)*1.2))
+               ml.setSpeed(int(float(right_speed)*0.2))
+               mr.setSpeed(int(float(right_speed)*1.4))
            else:
-               mr.setSpeed(int(float(left_speed)*0.3))
-               ml.setSpeed(int(float(left_speed)*1.2))
+               mr.setSpeed(int(float(left_speed)*0.2))
+               ml.setSpeed(int(float(left_speed)*1.4))
 
            ml.run(Adafruit_MotorHAT.FORWARD)
            mr.run(Adafruit_MotorHAT.FORWARD)

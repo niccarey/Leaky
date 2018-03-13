@@ -5,7 +5,7 @@ import cv2
 from navImage import NavImage
 import numpy as np
 from PIL import Image # can remove this after debug
-
+import multiprocessing as mp
 
 erode_kernel = np.ones((7,7), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
@@ -164,7 +164,7 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
     mask_unwrap = unwarp(wide_erode, xmap, ymap)
 
     _, cnts, _ = cv2.findContours(home_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts_lg = [c for c in cnts if cv2.contourArea(c)>300]
+    cnts_lg = [c for c in cnts if cv2.contourArea(c)>350]
     xmin = 600
     xmax = 0
     ymin = 0
@@ -179,6 +179,7 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
             if x < xmin : xmin = x
 
     cwidth = xmax - xmin
+    centre_approx = (xmax + xmin)/2
     delta = float(cwidth)/float(owidth)
 
     if delta < 1:
@@ -191,7 +192,7 @@ def run_tracking_mask( xmap, ymap, l_red, u_red, col_frame, wide_mask, owidth):
     tracking_mask = cv2.bitwise_and(mask_unwrap.astype(np.uint8), stripe_mask.astype(np.uint8))
     tracking_mask[tracking_mask>0] = 255
     
-    return cwidth, delta, hstore, tracking_mask, unwrap_gray, home_frame
+    return cwidth, delta, hstore, tracking_mask, unwrap_gray, home_frame, centre_approx
     
 def keypoint_height_calc(IK, a0, a2, a3, a4, xS):    
     for kp_it in IK.keypoints:
@@ -420,7 +421,6 @@ def leaving_home(cp, omni_frame, wide_mask, l_red, u_red):
     else: cx = cp[1]
 
     return len(cnts_lg), (cx - cp[1]), leave_frame.frame.copy()
-
 
 
 def sim_mse(imA, imB):
