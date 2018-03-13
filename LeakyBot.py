@@ -99,7 +99,8 @@ class LeakyBot(object):
 
     def set_turn_status(self):
         turn_dir = bool(random.getrandbits(1))
-        self.direction = 'revturn'
+        self.direction = 'turn'
+        
         if turn_dir: self.cam_flag = 1
         else: self.cam_flag = 0
              
@@ -178,19 +179,19 @@ class LeakyBot(object):
 
 
     def set_motor_values(self, left_speed, right_speed, left_dir, right_dir):
-	# more directly controllable version of set motor values, requires
-	# knowledge of robot state as input - use when heading direction is
-	# fixed and known
-	ml = self.motor_left
-	mr = self.motor_right
-	ml.setSpeed(left_speed)
-	mr.setSpeed(right_speed)
-	ml.run(left_dir)
-	mr.run(right_dir)
+    	# more directly controllable version of set motor values, requires
+	    # knowledge of robot state as input - use when heading direction is
+	    # fixed and known
+	    ml = self.motor_left
+	    mr = self.motor_right
+	    ml.setSpeed(left_speed)
+	    mr.setSpeed(right_speed)
+	    ml.run(left_dir)
+	    mr.run(right_dir)
 		
   
     def auto_set_motor_values(self, left_speed, right_speed):
-	# checks direction and sets eveyrthing automatically
+	    # checks direction and sets eveyrthing automatically
         ml = self.motor_left
         mr = self.motor_right
         check_dir = self.direction
@@ -224,15 +225,16 @@ class LeakyBot(object):
            mr.run(Adafruit_MotorHAT.BACKWARD)
 
         elif check_dir == 'turn':
-           if self.cam_flag:
-               ml.setSpeed(int(float(right_speed)*0.2))
-               mr.setSpeed(int(float(right_speed)*1.4))
-           else:
-               mr.setSpeed(int(float(left_speed)*0.2))
-               ml.setSpeed(int(float(left_speed)*1.4))
+            ml.setSpeed(left_speed)
+            mr.setSpeed(right_speed)
+            
+            if self.cam_flag:
+               ml.run(Adafruit_MotorHAT.BACKWARD)
+               mr.run(Adafruit_MotorHAT.FORWARD)
+            else:
+               ml.run(Adafruit_MotorHAT.FORWARD)
+               mr.run(Adafruit_MotorHAT.BACKWARD)
 
-           ml.run(Adafruit_MotorHAT.FORWARD)
-           mr.run(Adafruit_MotorHAT.FORWARD)
 
         else: 
             ml.run(Adafruit_MotorHAT.FORWARD)

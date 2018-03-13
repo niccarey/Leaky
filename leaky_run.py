@@ -20,10 +20,10 @@ import os
 
 import numpy as np
 from PIL import Image
-import threading 
+#import threading 
 
 from LeakyBot import LeakyBot
-from leaky_nav_functions import *
+import leaky_nav_functions as lns
 from KeypointExpanded import KeypointExpanded
 
 # Motor initialisation:
@@ -49,7 +49,7 @@ it.start()
 print("... Arduino started")
 
 print("Setting up filtering constants")
-# Filtering constants
+# Filtering constants (do I use these outside navigation??)
 erode_kernel = np.ones((5,5), np.uint8)
 dilate_kernel = np.ones((7,7), np.uint8)
 
@@ -73,7 +73,7 @@ poly_left = np.array([cp, [180, 1], [1, 1],[1, 600]])
 poly_right = np.array([cp, [600, 1], [600 ,1], [600, 430]])
 
 # ----------------------------------------------------------------------
-sides_mask, front_mask, wide_mask = define_masks([600, 600], cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
+sides_mask, front_mask, wide_mask = lns.define_masks([600, 600], cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
 
 # ----------------------------------------------------------------------
 lg_bound = 42
@@ -124,8 +124,6 @@ def flex_sensor_calib(flex1, flex2, vcc):
 def main():
     print("Leaky started ")
 
-    #global cX, cY
-
     # Initialise cameras - hold auto white balance constant to improve filtering
     print("Setting camera gains and white balance ")
     camgain = (1.4,2.1)
@@ -150,6 +148,7 @@ def main():
     gp.setup(17, gp.IN)
     gp.setup(27, gp.IN)
     gp.setup(22, gp.IN)
+    
 
     # usage: ST(clock pin, data pin) (default voltage)
     sens1 = ST(11, 17)
@@ -161,6 +160,10 @@ def main():
     homevec = np.array([0,0,0,0,1.0,1.0])
 
     hum_threshold = 75
+    
+    print("Setting up electromagnet block holder")
+    gp.setup(18, gp.OUT) 
+    gp.output(18, 1) # high is off (thanks to inverting transistor)
 
     # Set up motors
     print("Setting motor parameters")
@@ -176,21 +179,22 @@ def main():
     init_crop = init_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
     # update boundary functions (assumes we have some blocks visible)
     print("Identify green peak:")
-    l_green, u_green = boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 20, 255, 0, 255, 15)
+    l_green, u_green = lns.boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 20, 255, 0, 255, 15)
     print("Identify red peak:")
-    l_red, u_red = boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 90, 255, 180, 240, 10)
+    l_red, u_red = lns.boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 90, 255, 180, 240, 10)
     print(" ... setting up unwarp map ...")
-    xmap, ymap = buildMap(600,600, 720, 360, 300, cp[0], cp[1])
+    xmap, ymap = lns.buildMap(600,600, 720, 360, 300, cp[0], cp[1])
     print("...done")
     
     print(" ... initialise tracking mask: ")
-    o_width, tracking_mask, unwrap_gray = init_tracking_mask(xmap, ymap, l_red, u_red, init_crop.copy(), wide_mask.copy())
+    o_width, tracking_mask, unwrap_gray = lns.init_tracking_mask(xmap, ymap, l_red, u_red, init_crop.copy(), wide_mask.copy())
 
     print(" ... establishing SIFT features")
-    sift = cv2.xfeatures2d.SIFT_create()
-    kp_sift, des_sift = sift.detectAndCompute(unwrap_gray, tracking_mask.astype(np.uint8))
-
-    imdisp = cv2.drawKeypoints(unwrap_gray, kp_sift, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    surf = cv2.xfeatures2d.SURF_create()
+    kp_surf, des_surf = surf.detectAndCompute(unwrap_gray, tracking_mask.astype(np.uint8))
+    
+    # Image storage
+    imdisp = cv2.drawKeypoints(unwrap_gray, kp_surf, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
     template_im = Image.fromarray(imdisp)
     imname ='./TestIm/TemplateImage_date.jpg'
     template_im.save(imname)
@@ -198,13 +202,13 @@ def main():
     bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
 
     print(" ... estimating identified feature locations")
-    InitialKeypoints = KeypointExpanded(kp_sift)
+    InitialKeypoints = KeypointExpanded(kp_surf)
     a0 = -188.44
     a2 = 0.0072
     a3 = -0.0000374
     a4 = 0.0000000887
     xS = 125
-    InitialKeypoints = keypoint_height_calc(InitialKeypoints, a0, a2, a3, a4, xS)
+    InitialKeypoints = lns.keypoint_height_calc(InitialKeypoints, a0, a2, a3, a4, xS)
     print("Finished setting up homing system")
 
     running = True
@@ -213,27 +217,35 @@ def main():
 
     winset = 0
     start_lk_time = time.time()
+    
     print("Waiting for block ...")
     with open("./TestIm/070318_trial2.txt", "a") as storefile:
         
         while running:
             looptime = time.time()
             # check for button pushes
-            if leaky1.is_waiting() or leaky1.is_deposit() or leaky1.is_turning() or leaky1.is_driving():
+            
+            if leaky1.is_waiting():
                 try:
                     block_trigger = block_pin.read()
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     if block_trigger > 0.02:
                         print("Triggered, " , block_trigger)
                         storefile.write("Block trigger: " + str(time.time()-start_lk_time) + "\n")
+                        
+                        # Turn on electromagnet
+                        # do an internal PWM cycle while we turn away from the entrance
+                        gp.output(18, 0) # set low (on)
                         # pick a random direction to start
                         leaky1.cam_flag = bool(random.getrandbits(1))
+                        
+                        # REPLACE THIS with something less derpy if electromagnet works
                         get_away_count = 0
-                        while get_away_count < 7:
-                            leaky1.generic_rev_turn(0.12)
-                            time.sleep(0.2)
-                            leaky1.generic_turn(0.12)
-                            time.sleep(0.2)
+                        while get_away_count < 12:
+                            leaky1.generic_turn(0.1)
+                            gp.output(18,1)
+                            time.sleep(0.001)
+                            gp.output(18, 0) # set low (on)
                             get_away_count += 1
 
                         leaky1.button_push()
@@ -242,66 +254,67 @@ def main():
                     print("Problem reading board, retry ...")
                     print(e)
             
-            # get camera frames
+            # Get camera frames
             full_frame = picam.read()
             omni_frame = full_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
-            save_frame = omni_frame.copy()
-    
-            #try: prev_frame
-            #except NameError: print("...") #no frame yet
-            #else:
-            #    if (leaky1.direction == 'turn' or leaky1.direction=='fwd') and (not leaky1.is_sensing()):
-            #        diff_val = sim_mse(save_frame, prev_frame)
-            #        #print("vis sim: ", diff_val)
-    
-    
+
+            # At some point I removed difference imaging - reinstigate?
+            #save_frame = omni_frame.copy()
+        
             if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()):
+                
+                # IF SPEED UP WORKS: take out sleep and 0,0 motor settings, we just run while we process
                 # -----------------------------------
                 # Each loop, move in pre-set direction, then stop and sense
                 leaky1.auto_set_motor_values(leaky1.speed, leaky1.speed)
-                time.sleep(0.1)
+                #time.sleep(0.1)
     
-                leaky1.auto_set_motor_values(0,0)
-                start_time = time.time()
+                #leaky1.auto_set_motor_values(0,0)
                 # -----------------------------------
     
                 if (leaky1.is_turning()):
                     # set direction
-                    leaky1.set_turn_direction()
+                    # REMOVE IF ELECTROMAGNET WORKS
+                    #leaky1.set_turn_direction()
     
                     # we are either a) looking for wall balancing or b)looking to deposit
-                    if leaky1.high_humidity:
-                        print("Balancing walls: ") # this is a bit janky - we end up with a strong bias
-    
-                        heading_angle, show_frame = omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
-                        rednum, red_head, red_frame = leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
-                        #imgsave(show_frame, './TestIm/balance_frame_', fcount)
-                        #imgsave(red_frame, './TestIm/leaving_red_bars_', fcount)
+
+                    # pulse electromagnet off then on (v quickly)
+                    gp.output(18,1)
+                    time.sleep(0.0005)
+                    gp.output(18, 0) # set low (on)
+
+                    if leaky1.high_humidity:                        
+                        #print("Balancing walls: ") # this is a bit janky - we end up with a strong bias
+                        rednum = lns.leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
                         # ---------------------------------
                         # make sure we cannot see home base, try to balance walls
                         if rednum > 0:
-                            print("Can see red bars: ", rednum)
+                            print("Balancing - can see red bars: ", rednum)
                             #just keep turning
+                            
+                        else:
+                            heading_angle = lns.omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
+                            if (heading_angle > 2.75) or (heading_angle < -2.75) :
+                                print('walls balanced!')
+                                leaky1.walls_balanced()
     
-                        elif (heading_angle > 2.75) or (heading_angle < -2.75) :
-                            print('walls balanced!')
-                            leaky1.walls_balanced()
-    
-                        elif heading_angle > 0: leaky1.cam_flag = 1
-                        elif heading_angle < 0: leaky1.cam_flag = 0
-    
-                        else: print('no walls in view')
-    
+                            elif heading_angle > 0: leaky1.cam_flag = 1
+                            elif heading_angle < 0: leaky1.cam_flag = 0
+                            else: print('no walls in view')    
     
                     else: # we must be looking for a deposition spot
-                        blob_num, heading_angle, maxminbox, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
-                        #imgsave(show_frame, './TestIm/green_depo_seek', fcount)
+                        blob_num, heading_angle, maxminbox, box_ratio = lns.omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
     
                         if blob_num > 0 and ((min(maxminbox) < 220) or max(maxminbox > 560)):
                             print("Visual overlap. Moving to deposition")
                             leaky1.wall_found()
     
                 elif leaky1.is_deposit(): # This won't guarantee the block is deposited on a wall, but it will try damn hard
+                    gp.output(18,1)
+                    time.sleep(0.0005)
+                    gp.output(18, 0) # set low (on)
+
                     try:
                         f1 = 150*(flex1.read()*vcc -f1_av)
                         f2 = 100*(flex2.read()*vcc -f2_av)
@@ -312,24 +325,24 @@ def main():
                             kill_count = 0
                             leaky1.set_probability([0.0,0,0,0,0.0, 0.0])
                             leaky1.reached_wall()
+                            gp.output(18, 1) # Turn off electromagnet
                             continue
     
                     except: print("No data from flex sensors")
     
-                    blob_num, heading_angle, minmaxbox, box_ratio, show_frame = omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
-                    #imgsave(show_frame, './TestIm/green_depo_', fcount)
+                    blob_num, heading_angle, minmaxbox, box_ratio = lns.omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
     
                     # SET PROBABILITY
                     if blob_num > 0:
-                        blob_vec = dep_prob_calculator(blob_num, box_ratio, minmaxbox)
+                        blob_vec = lns.dep_prob_calculator(blob_num, box_ratio, minmaxbox)
                         probvec = np.diagonal([leaky1.probability]).copy()
                         np.put(probvec, [0,1], blob_vec.astype(float))
                         leaky1.set_probability([probvec])
     
-                    deposit_prob = localisation_calculator(depvec, leaky1.probability)
+                    deposit_prob = lns.localisation_calculator(depvec, leaky1.probability)
                     print("green blobs, location estimation, box_ratio: ", blob_num,  deposit_prob, box_ratio)
     
-                    if (deposit_prob > 0.8) or (kill_count > 30): 
+                    if (deposit_prob > 0.7) or (kill_count > 30): 
                         kill_count = 0
                         leaky1.set_probability([0, 0, 0, 0, 0.0, 0.0])
                         leaky1.reached_wall()
@@ -344,20 +357,22 @@ def main():
                         leaky1.direction = 'fwd'
     
                     elif (blob_num>1) or (abs(heading_angle) < 2.6):
-                        if leaky1.direction == 'fwd': leaky1.direction = 'turn'
+                        leaky1.direction = 'turn'
     
                         if abs(heading_angle < 2.6):
                             if heading_angle > 0: leaky1.cam_flag = 0
                             elif heading_angle < 0: leaky1.cam_flag = 1
     
-                    leaky1.set_turn_direction()
+                    # REMOVE IF ELECTROMAGNET WORKS
+                    #leaky1.set_turn_direction()
+
                     print('I think I am turning: ',leaky1.cam_flag, leaky1.direction, heading_angle)
                     kill_count += 1
     
     
                 elif (leaky1.is_backup()):
                     # we are just looking for rear wall, then we transition to homing algorithm
-                    red_num, show_frame = omni_home(cp, omni_frame, front_mask, l_red, u_red)
+                    red_num = lns.omni_home(cp, omni_frame, front_mask, l_red, u_red)
     
                     print("Looking for entrance, Markers seen: ", red_num)
                     if (red_num < 2):
@@ -378,14 +393,11 @@ def main():
                     read_im = picam.read()
                     compare_im = read_im[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
     
-                    c_width, delta, h_store, tracking_comp, unwrap_gray_comp, home_check, red_cent = run_tracking_mask(xmap, ymap, l_red, u_red, compare_im.copy(), wide_mask.copy(), o_width)
+                    c_width, delta, h_store, tracking_comp, unwrap_gray_comp, home_check, red_cent = lns.run_tracking_mask(xmap, ymap, l_red, u_red, compare_im.copy(), wide_mask.copy(), o_width)
                     #imgsave(tracking_comp, './TestIm/homing_check_', hcount)
     
-                    if h_store > 40:
-                        height_weight = 0.3
-                    elif h_store > 30:
-                        height_weight = 0.1
-    
+                    if h_store > 40: height_weight = 0.3
+                    elif h_store > 30: height_weight = 0.1    
                     else: height_weight = 0
     
                     try:
@@ -406,15 +418,15 @@ def main():
 
                     except: print("No info from bend sensors")
     
-                    kp_comp_sift, des_comp_sift = sift.detectAndCompute(unwrap_gray_comp, tracking_comp.astype(np.uint8))
-                    imdisp = cv2.drawKeypoints(unwrap_gray_comp, kp_comp_sift, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+                    kp_comp_surf, des_comp_surf = surf.detectAndCompute(unwrap_gray_comp, tracking_comp.astype(np.uint8))
+                    #imdisp = cv2.drawKeypoints(unwrap_gray_comp, kp_comp_surf, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
                     #imgsave(imdisp, './TestIm/HomingView_', hcount)
                     
-                    if (not (des_comp_sift is None)) :
-                        sift_matches = bf.match(des_sift, des_comp_sift) 
-                        sift_matches = sorted(sift_matches, key= lambda x:x.distance)
+                    if (not (des_comp_surf is None)) :
+                        surf_matches = bf.match(des_surf, des_comp_surf) 
+                        surf_matches = sorted(surf_matches, key= lambda x:x.distance)
                         
-                        rotation, x_est, y_est = est_egomotion(sift_matches, InitialKeypoints, kp_comp_sift)
+                        rotation, x_est, y_est = lns.est_egomotion(surf_matches, InitialKeypoints, kp_comp_surf)
                         if abs(rotation*180/np.pi) > 5:
                             direction_weight = 0
                             if rotation > 0:
@@ -465,8 +477,7 @@ def main():
             # CHECK HUMIDITY DATA        
             if leaky1.is_sensing():
                 if (time.time() - leaky1.sensing_clock < 35):
-                    time.sleep(0.1)
-    
+                    time.sleep(0.1)    
                     hum_count = 0                
                     for sens_i in sens_array:
                         try:
@@ -518,10 +529,9 @@ def main():
                 if (time.time() - leaky1.driving_clock < 0.2):
                     time.sleep(0.1)
                 
-                else:
-                    leaky1.stop_driving()
+                else: leaky1.stop_driving()
             
-            prev_frame = save_frame
+            #prev_frame = save_frame
             fcount += 1
             
             if winset:
