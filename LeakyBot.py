@@ -2,6 +2,7 @@
 from transitions.extensions import GraphMachine as Machine
 import os, sys, inspect, io
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+import RPi.GPIO as gp
 import numpy as np
 import time
 import random
@@ -14,21 +15,18 @@ class LeakyBot(object):
  
     states = ['waiting', 'turning', 'sensing', 'driving', 'deposit', 'backup', 'go_home']
     
-    transitions = [ {'trigger':'button_push', 'source':'waiting', 'dest':'turning'},
-        {'trigger':'button_push', 'source':'deposit', 'dest':'backup'},
-        {'trigger':'button_push', 'source':'driving', 'dest':'deposit'},
-        {'trigger':'button_push', 'source':'turning', 'dest':'backup', 'unless':'do_high_humidity'},
+    transitions = [ {'trigger':'block_sensed', 'source':'waiting', 'dest':'turning', 'prepare':'close_block_holder'},
         {'trigger':'walls_balanced', 'source':'turning', 'dest':'sensing', 'prepare':'set_loop', 'conditions':['do_have_block', 'do_high_humidity']}, 
         {'trigger':'humidity_maintained', 'source': 'sensing', 'dest':'driving', 'conditions':'do_high_humidity'},
         {'trigger':'stop_driving', 'source':'driving', 'dest':'sensing'},
         {'trigger':'low_humidity', 'source':'sensing', 'dest':'turning', 'prepare':'set_turn_status'},
-        {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'conditions':'do_have_block', 'unless':'do_high_humidity'},
+        {'trigger':'wall_found', 'source':'turning', 'dest':'deposit', 'conditions':'do_have_block', 'unless':'do_high_humidity', 'prepare':'open_block_holder'},
         {'trigger':'reached_wall', 'source':'deposit', 'dest':'backup'},
         {'trigger':'home_spotted', 'source':'backup', 'dest':'go_home', 'unless':'do_have_block'},
         {'trigger':'close_to_home', 'source':'go_home', 'dest':'waiting'}]
             
     
-    def __init__(self, motor_left, motor_right):
+    def __init__(self, motor_left, motor_right, servo, servoPin, prev_prob=0.3):
         # uniform initialization functions
         self.machine = Machine(model=self, states=LeakyBot.states, transitions=LeakyBot.transitions, initial='waiting', show_auto_transitions=False)
         self.direction = 'fwd' 
@@ -46,22 +44,43 @@ class LeakyBot(object):
         self.high_humidity = True
         self.have_block = False
 
+        self.servoPin = servoPin
+        self.servo_driver = servo
+
+        self.initial_prob = prev_prob
+        self.prev_prob = prev_prob
+
+    # conditionals
+
     def do_have_block(self):
         return(self.have_block)
 
     def do_high_humidity(self):
-        return(self.high_humidity)
+        return(self.high_humidity)        
+        
+    def have_block(self):
+        print(self.have_block)
+        return self.have_block
+        
+    def high_humidity(self):
+        return self.high_humidity
+
+    # Sensor fusion
 
     def set_probability(self, diagvec):
+        # Adjust this
         self.probability = np.diagflat([diagvec])
 
     def update_probability(self, add_vec):
+        # Adjust this
         prob_matrix = self.probability. astype(float)
         prob_vec = np.diagonal(prob_matrix).copy()
         prob_vec += add_vec.astype(float)
         ret_matrix = np.diagflat([prob_vec])
 
         self.probability = ret_matrix
+
+    # Enter functions
 
     def on_enter_turning(self):
         print(self.state)
@@ -77,9 +96,6 @@ class LeakyBot(object):
         self.auto_set_motor_values(self.speed, self.speed)
         self.driving_clock = time.time()
 
-    def on_exit_driving(self):
-        self.auto_set_motor_values(0,0)
-        
 
     def on_enter_sensing(self):
         print(self.state)
@@ -87,6 +103,28 @@ class LeakyBot(object):
         self.auto_set_motor_values(0,0)
         self.sensing_clock = time.time()
         self.sensor_loop += 1
+
+    # exit functions
+
+    def on_exit_driving(self):
+        self.auto_set_motor_values(0,0)
+        
+
+    # preparation modules
+
+    def close_block_holder(self):
+        sDrive = self.servo_driver
+        sPin = self.servoPin
+        drive_servo(sDrive, sPin, 0, 2.5)
+
+
+    def open_block_holder(self):
+        sDrive = self.servo_driver
+        sPin = self.servoPin
+        drive_servo(sDrive, sPin, 180, 2.5)
+
+    
+
 
     # no need for this?
     def set_loop(self):
@@ -107,6 +145,9 @@ class LeakyBot(object):
         print("Turning direction: ", self.cam_flag)
         self.auto_set_motor_values(0,0)
         time.sleep(1.5)
+
+    # functional modules
+
 
     def go_backwards(self, drive_time):
         store_direction = self.direction
@@ -158,6 +199,7 @@ class LeakyBot(object):
         
     def on_enter_backup(self):
         print(self.state)
+        self.prev_prob = self.initial_prob
         self.direction = 'rev'
         self.auto_set_motor_values(self.speed, self.speed)
         time.sleep(0.6)
@@ -176,6 +218,16 @@ class LeakyBot(object):
     def on_enter_go_home(self):
         print("Now entering:" , self.state)
         self.high_humidity = True # probably not necessary but anyway
+
+
+    def drive_servo(sDrive, sPin, direction, duration):
+        pulse = (direction/18) + 2.5
+
+        gp.output(sPin, True)
+        sDrive.ChangeDutyCycle(pulse)
+        time.sleep(duration)
+        gp.output(sPin, False)
+        sDrive.ChangeDutyCycle(0)
 
 
     def set_motor_values(self, left_speed, right_speed, left_dir, right_dir):
@@ -241,10 +293,3 @@ class LeakyBot(object):
             mr.run(Adafruit_MotorHAT.FORWARD)
             
              
-        
-    def have_block(self):
-        print(self.have_block)
-        return self.have_block
-        
-    def high_humidity(self):
-        return self.high_humidity
