@@ -39,6 +39,7 @@ def unwarp(img_array, xmap, ymap):
 cp = [ 300, 300 ]
 r_out = 298;
 r_inner = 150;
+
 r_norim = 295;
 
 poly_front = np.array([cp, [20, 1], [600,1]])
@@ -70,6 +71,7 @@ mask_unwrap = unwarp(init_mask_erode, xmap, ymap)
 # Method: convert to HSV, use usual method to obtain RED and GREEN blobs
 # May want to check histogram output of direct frames, this looks shifted compared to usual
 
+
 lr_bound = 90
 ur_bound = 120
 
@@ -89,6 +91,7 @@ redframe.hsvMask(l_red, u_red)
 
 # expand drastically and combine masks
 redframe.erodeMask(erode_kernel, 1)
+
 redframe.dilateMask(dilate_kernel, 1)
 
 # TODO:  use redframe bounding box to derive search mask for patterns
@@ -160,6 +163,7 @@ flann = cv2.FlannBasedMatcher(index_params, search_params)
 
 # FLANN knn is comparable to brute force non-knn, but when results are wrong they have more of a bias.
 
+
 for file in files("."):
     print(file)
     compare_im = cv2.imread(file)
@@ -220,6 +224,7 @@ for file in files("."):
             
         #draw_surf_params = dict(matchColor = color[np.random.randint(0,100)], singlePointColor = (255,0,255), matchesMask = surf_matchesMask, flags = 0)
     
+
     # BF knn matching
     #blue_matches = bf.knnMatch(des_blue.astype(np.uint8), des_comp_b.astype(np.uint8), k=2)
     #green_matches = bf.knnMatch(des_green.astype(np.uint8), des_comp_g.astype(np.uint8), k=2)
@@ -233,7 +238,6 @@ for file in files("."):
     #    if m.distance < 0.75*n.distance :
     #        good.append([m])
             
-                
         match_image = cv2.drawMatches(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches[:20], None, flags=2)
         #match_image = cv2.drawMatchesKnn(baseim, kp, compare_im, kp_comp, good, None, flags=2)
         #match_image = cv2.drawMatchesKnn(unwrap_base, kp_surf, comp_unwrap, kp_comp_surf, surf_matches, None, **draw_surf_params)
@@ -257,6 +261,7 @@ for file in files("."):
         #match_image = cv2.drawMatches(unwrap_base, kp_sift, comp_unwrap, kp_comp_sift, sift_matches[:20], None, flags=2)
         #match_image = cv2.drawMatchesKnn(baseim, kp, compare_im, kp_comp, good, None, flags=2)
         match_image = cv2.drawMatchesKnn(unwrap_base, kp_sift, comp_unwrap, kp_comp_sift, sift_matches, None, **draw_sift_params)
+
 
         cv2.imshow('check match', match_image)
         #cv2.imshow('check green match', match_image_g)

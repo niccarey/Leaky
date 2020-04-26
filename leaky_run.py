@@ -30,6 +30,7 @@ from LeakyBot import LeakyBot
 import leaky_nav_functions as lns
 import kernel_def
 
+
 logging.basicConfig(level=logging.DEBUG)
 gp.setmode(gp.BCM)
 gp.setwarnings(False)
@@ -116,6 +117,7 @@ def flex_sensor_calib(adc, flex1, flex2, gain):
         f1s += f1v
         f2s += f2v
         flexcount += 1
+
 
     return f1s/10, f2s/10
 
@@ -261,10 +263,10 @@ def main():
                 # Eac loop, move in pre-set direction, then stop and run appropriate sensing subfunction
                 leaky.auto_set_motor_values(leaky.speed, leaky.speed)
 
+
                 # ------ SENSOR SUBFUNCTIONS ------ #
                 if (leaky.is_turning()):
-
-                	if leaky.high_humidity:    
+                  if leaky.high_humidity:    
 
                         rednum = lns.leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
                         # ---------------------------------
@@ -329,6 +331,7 @@ def main():
     				if abs(f2_read) > 20: bend_exists = 1
     				if box_ratio > 1.5: ratio_exists = 1
 
+
     				new_prob = lns.localisation_prob(leaky.prev_prob, bend_exist, ratio_exist, walls_exist):
     				leaky.prev_prob = new_prob
 
@@ -351,11 +354,11 @@ def main():
                 elif (leaky.is_backup()):
                     # we are just looking for rear wall, then we transition to homing algorithm
                     red_num = lns.omni_home(cp, omni_frame, front_mask, l_red, u_red)
+
     
                     logging.debug("Looking for entrance, Markers seen: ", red_num)
                     if (red_num < 2):
                         leaky.direction='revturn'
-    
                     else:
                         leaky.have_block = False
                         kill_count = 0 # failsafe, shouldn't need this
@@ -483,8 +486,11 @@ def main():
 
 	# Shutdown Leaky
 	logging.debug("Finished deposition cycle")
+
     shutdownLeaky()
-    
+
+
 
 if __name__ == '__main__':
 	main()
+

@@ -33,6 +33,7 @@ sides_mask, front_mask, wide_mask = define_masks([600,600], cp, r_out, r_inner, 
 
 lg_bound = 50
 ug_bound = 70
+
 picam = VideoStream(usePiCamera=True, resolution=(1648,1232)).start()
 
 time.sleep(0.5)
@@ -117,3 +118,4 @@ while running:
 #imgmask.save(immaskname)
 
 #time.sleep(2)
+
