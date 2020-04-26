@@ -1,16 +1,20 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Libraries
+# Structure and outline 
+
 from picamera import PiCamera
 from picamera.array import PiRGBArray
 import imutils
 from imutils.video import VideoStream
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
-from pyfirmata import Arduino, util
 from navImage import NavImage
-from sht_sensor import Sht as ST
+
+import logging
+import adafruit_tca9548a
 import RPi.GPIO as gp
+import Adafruit_GPIO.I2C as I2C
+import Adafruit_ADS1x15
 
 import random
 import atexit
@@ -19,524 +23,474 @@ import cv2
 import os
 
 import numpy as np
-import threading 
-import curses
+from PIL import Image
+#import threading 
 
 from LeakyBot import LeakyBot
+import leaky_nav_functions as lns
+import kernel_def
 
 
-# initialisation: any global variables, etc 
+logging.basicConfig(level=logging.DEBUG)
+gp.setmode(gp.BCM)
+gp.setwarnings(False)
 
-# Motor initialisation:
-print("Initialising motor hat ...")
+# Initialise TCA (easier to do this before importing SHT C library)
+error = 1
+while error:
+	try:
+		I2CBusNum = 1
+		tca_bus = I2C.Device(0x70, I2CBusNum)
+		error = 0
+
+	except:
+		print("Trouble communicating with TCA multiplexer, trying again ...")
+
+from sht_lib import SHT85_I2C
+import SHTConstants as sensing_clock
+
+
+# Initialise motors, including servo
+logging.debug("Initialising motor hat ...")
 mh = Adafruit_MotorHAT(addr=0x60)
-myMotor1 = mh.getMotor(1)
-myMotor2 = mh.getMotor(3)
-print("...done")
+myMotor1 = mh.getMotor(2)
+myMotor2 = mh.getMotor(4)
+logging.debug("...done")
 
+# Any interfacing using gp may need several attempts 
+logging.debug("Setting up servo motor ...")
+servoPin = 12
+for attempt in range(0,2):
+	try:
+		gp.setup(servoPin, gp.OUT)
+		servo_drive = gp.PWM(servoPin, 100)
+		logging.debug("...done")
+	except:
+		print("GPIO communication problem, trying again ...")
 
-print("Initialising cameras ...")
-# Camera initialization
-webcam = VideoStream(src=0).start()
-picam = VideoStream(usePiCamera=True, resolution=(640,480)).start()
+# Initialise reflectance sensor, prox sensor, and flex sensor channels
+refPin = 25
+proxPin = 23
+left_flex_chan = 0
+right_flex_chan = 1
+prox_chan = 3
 
+# Initialise cameras
+logging.debug("Setting up camera streaming ...")
+picam = VideoStream(usePiCamera=True, resolution=(1640,1232)).start()
 time.sleep(0.1)
-print("...done")
+logging.debug("...done")
 
-print("Initializing Arduino ...")
-# Arduino intialisation
-board = Arduino('/dev/ttyACM0')
-time.sleep(0.5)
-it = util.Iterator(board)
-it.start()
-print("... Arduino started")
+# Initialise image processing tools, filters and masks
+# Mask parameters are defined in kernel_def
+sides_mask, front_mask, wide_mask = lns.define_masks([600, 600], cp, r_out, r_inner, r_norim, poly_front, poly_back, poly_left, poly_right)
 
-print("Setting up filtering constants")
-# Filtering constants
-erode_kernel = np.ones((5,5), np.uint8)
-dilate_kernel = np.ones((7,7), np.uint8)
-
-l_red_left = np.array([170, 180, 0])
-u_red_left = np.array([180, 255, 255])
-l_red_right = np.array([0, 200, 0])
-u_red_right = np.array([10, 255, 255])
-
-l_blue_left = np.array([110, 0, 20])
-u_blue_left = np.array([150, 100, 255])
-l_blue_right = np.array([100, 0, 0])
-u_blue_right = np.array([150, 100, 255])
-
-# Matched filtering:
-kernsize = 17
-temp_size = 30
-temp_blur_size = 11
-corner_template = np.zeros((240,temp_size))
-corner_template[:,1:15] = 1
-
-left_template = np.array(255*cv2.GaussianBlur(corner_template, (kernsize, kernsize),0), dtype=np.uint8)
-right_template = cv2.flip(left_template, 1)
-
-
-# shuts down motors and cameras on program exit, cleans up terminal
 def shutdownLeaky():
     myMotor1.run(Adafruit_MotorHAT.RELEASE)
     myMotor2.run(Adafruit_MotorHAT.RELEASE)
-
-    webcam.stop()
     picam.stop()
     cv2.destroyAllWindows()
-    curses.endwin()
+    for attempt in range(3):
+    	try:
+    		gp.cleanup()
+    	except: 
+    		print("Problems cleaning up, retry ...")
 
 
 atexit.register(shutdownLeaky)
 
-print("Establishing global variables")
+def imgsave(image_array, imname, fcount):
+    storeIm = Image.fromarray(image_array)
+    imname += str(fcount)
+    imname += '.jpg'
+    storeIm.save(imname)
 
-# Image filters
-deposit_edge = False
-backup_edge = False
+def flex_sensor_calib(adc, flex1, flex2, gain):
+    flexcount = 0
+    f1s = 0
+    f2s = 0
 
-cX = 0
-cY = 0
-
-blue_walls_match = 50
-home_match = 50
-left_home = 0
-right_home = 0
-blue_left_wall = 0
-blue_right_wall = 0
-
-def balance_detection(left_frame, right_frame, lb_left, lb_right, ub_left, ub_right, lscale, rscale, l_offset, r_offset):
-    leftIm = NavImage(left_frame)
-    rightIm = NavImage(right_frame)
-    
-    leftIm.convertHsv()
-    rightIm.convertHsv()
-    
-    
-    leftIm.hsvMask(lb_left, ub_left)
-    rightIm.hsvMask(lb_right, ub_right)
-    
-    leftIm.erodeMask(erode_kernel, 1)
-    rightIm.erodeMask(erode_kernel,1)
-    rightIm.dilateMask(dilate_kernel, 1)
-    
-    left_weight = leftIm.maskWeight(lscale, l_offset)
-    right_weight = rightIm.maskWeight(rscale, r_offset)
-    
-    weight_diff = left_weight - right_weight
-    
-    return (weight_diff, left_weight, right_weight)
+    while (flexcount < 10):
+        time.sleep(0.05)
+        f1v = lns.get_adc_reading(adc, flex1, gain)#flex1.read()*vcc
+        f2v = lns.get_adc_reading(adc, flex2, gain)#flex2.read()*vcc
+        f1s += f1v
+        f2s += f2v
+        flexcount += 1
 
 
-def find_edge(nav_frame, l_bound, u_bound, thresh_state, cam_flag, location):
-    global cX, cY
-    
-    nav_image = NavImage(nav_frame) 
-    nav_image.convertHsv()     
-    nav_image.hsvMask(l_bound, u_bound)
-    
-    
-    # additional operations: probably don't need
-    nav_image.erodeMask(erode_kernel, 1) 
-    nav_image.dilateMask(dilate_kernel, 1)
-    blur_im = np.array(cv2.GaussianBlur(nav_image.frame, (temp_blur_size, temp_blur_size), 0), dtype=np.uint8)
+    return f1s/10, f2s/10
 
-    
-    if cam_flag: #(direction == 'left'):
-        template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), left_template, cv2.TM_CCORR_NORMED)
-        
-    else:
-        template_match = cv2.matchTemplate(np.array(nav_image.frame, dtype=np.uint8), right_template, cv2.TM_CCORR_NORMED)
-        #cv2.imshow("WTF", blur_im)
-    
-    # Locate best template match
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(template_match)
-    print max_val
+def main():
 
-    if (max_val > 0.7) and (max_loc[0]>2):
-        # we are fairly sure we have found a good match
-        # get true edge location
-        cX = max_loc[0]+temp_size//2 
-        cY = max_loc[1] 
-        #print(cX)
-        
-        if thresh_state == 'leq' and (max_loc[0] + temp_size//2 < location):
-            #print("Passed threshold. leq")
-            return True
-        
-        elif thresh_state == 'geq' and (max_loc[0] + temp_size//2 > location):
-            #print("Passed threshold, geq")
-            return True  
-            
-        else:
-            return False
-    
-    elif np.count_nonzero(blur_im) > 200000: # most of the screen is block
-        print("uhoh, too close!")
-        return True
-        
-    else:
-        return False    
+    logging.debug("Begin deposition program")
 
-    
-def lpfilter(input_buffer):
-    # check length
-    if len(input_buffer) < 3:
-        return 0
-    
-    else:
-        output = 0.6*input_buffer.pop() + 0.2*input_buffer.pop() + 0.2*input_buffer.pop()
-        return output
-
-
-# Should'nt need this now
-def check_edges(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, found_edge_threshold, back_up_threshold):
-    global deposit_edge
-    global backup_edge
-    
-    deposit_edge = find_edge(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, found_edge_threshold)
-    backup_edge = find_edge(nav_frame, prev_frame, l_bound, u_bound, threshold_state, cam_flag, back_up_threshold)
-    if deposit_edge:
-        print("deposit: TRUE")
-        
-    if backup_edge:
-        print("Backup: TRUE")
-
-
-def check_balance(lframe, rframe, ll_bound, ul_bound, lr_bound, ur_bound, left_scale, right_scale, left_offset, right_offset, wall_flag): #ubl, ubr, bl_scale, br_scale, lb_offset, rb_offset, lrl, lrr, url, urr, rl_scale, rr_scale, lr_offset, rr_offset):
-    global blue_walls_match
-    global home_match
-    
-    global left_home, right_home
-    global blue_left_wall, blue_right_wall
-    
-    if wall_flag: 
-        blue_walls_match, blue_left_wall, blue_right_wall = balance_detection(lframe, rframe, ll_bound, lr_bound, ul_bound, ur_bound, left_scale, right_scale, left_offset, right_offset)
-        
-    else: 
-        home_match, left_home, right_home  = balance_detection(lframe, rframe, ll_bound, lr_bound, ul_bound, ur_bound, left_scale, right_scale, left_offset, right_offset)
-    
-    
-
-def main(stdscr):
-    
-    stdscr.nodelay(1)
-    curses.cbreak()
-    curses.noecho()
-    
-    stdscr.addstr("Leaky started \n")
-    
-    global deposit_edge
-    global backup_edge
-    
-	# Initialise cameras - hold auto white balance constant to improve filtering
-    stdscr.addstr("Setting camera gains and white balance \n")
+	# Set camera gain and white balance
+	logging.debug("Setting camera gains and white balance ...")
     camgain = (1.4,2.1)
     picam.camera.awb_mode = 'off'
     picam.camera.awb_gains = camgain
+    logging.debug("... Done")
 
-    os.system('v4l2-ctl --set-ctrl=white_balance_temperature_auto=0')
-    os.system('v4l2-ctl --set-ctrl=white_balance_temperature=2800')
-    os.system('v4l2-ctl --set-ctrl=exposure_auto=1')
-    os.system('v4l2-ctl --set-ctrl=exposure_absolute=200')
-    os.system('v4l2-ctl --set-ctrl=brightness=0')    
-    
-    # Set Arduino pressure sensor pin
-    block_pin = board.get_pin('a:5:i')
-    
-    stdscr.addstr("Establishing humidity sensing GPIO settings \n")
-    # Set up humidity sensing
-    gp.setwarnings(False)
-    gp.setmode(gp.BCM)
+    # Initialise TCA channels
+    adc_chan = 0B0000100
 
-    gp.setup(11, gp.OUT)
-    gp.setup(17, gp.IN)
-    gp.setup(27, gp.IN)
-    gp.setup(22, gp.IN)
-    
-    # usage: ST(clock pin, data pin) (default voltage)
+    # Initialise thresholds
+    hum_threshold = 75 # humidity
+    block_threshold = 50 # block placement threshold
+    prox_threshold = 870 # homing proximity threshold
+    PROXGAIN = 1
 
-    # have to use correct voltage option - default is 3.5V, otherwise
-    # sens = ST(clock, data, voltage=ShtVDDLevel.vdd_5v) OR try
-    # sens = ST(clock, data, '5V')
+    hsens1 = 0B0000001
+    hsens2 = 0B0000010
+    hsens3 = 0B1000000
 
-    sens1 = ST(11, 17)
-    sens2 = ST(11, 27)
-    sens3 = ST(11, 22)
+    humidity_channels = [hsens1, hsens2, hsens3]
 
-    sens_array = [sens1, sens2, sens3]
-    
-    hum_threshold = 65
-    
-    # Set up motors
-    stdscr.addstr("Setting motor parameters \n")
-    leaky1 = LeakyBot(myMotor1, myMotor2)    
-    leaky1.speed = 140
-    leaky1.direction = 'fwd'
-    
-    stdscr.addstr("Setting navigation parameters \n")
-    # Set navigation thresholds:
-    found_edge_threshold = 350
-    back_up_threshold = 550
-    leaky1.threshold_state = 'leq'
-    
-    start_turning_frame = 0
-    
-    running = True
-    
-    fcount = 1
-    # to-do: improve motor control setup
-    
+    # Initialise humidity sensors, check if all are working
+    for channel in humidity_channels:
+    	for attempt in range(2):
+			try: 
+				tca_bus.writeRaw8(channel)
+			except:
+				print("Trouble moving to TCA device, retry ...")
+
+		sht_instance = SHT85_I2C()
+		tiime.sleep(0.02)
+		serialNum, error = sht_instance.SHT_ReadSerial()
+		if serialNum == 0:
+			logging.debug("Trouble accessing sensor at ", channel)
+
+		time.sleep(0.2)
+		# clear flags
+		error = sht_instance.SHT85_ClearFlags()
+		time.sleep(0.2)
+
+
+	# Initialise ADC, initialise and calibrate flex sensors
+	logging.debug("Initialising flex sensors ...")
+
+	# ADC goes through TCA, need to switch to correct channel
+	for attempt in range(3):
+		try: 
+			tca_bus.writeRaw8(adc_chan)
+		except:
+			print("Trouble communicating with TCA multiplexer, trying again ...")
+
+
+	adc = Adafruit_ADS1x15.ADS1115()
+	FLEXGAIN = 1
+	vcc = 5
+	f1_av, f2_av = flex_sensor_calib(adc, left_flex_chan, right_flex_chan, FLEXGAIN, vcc)
+    print("Whisker default positions: ", f1_av, f2_av)
+    logging.debug("Done")
+
+
+	# Initialise robot, incl. motors
+	logging.debug("Setting up Leaky instance ...")
+    leaky = LeakyBot(myMotor1, myMotor2, servo_drive, servoPin, 0.3)
+    leaky.speed = 170
+    leaky.direction = 'fwd'
+    logging.debug("...Done")
+	# Initialise servo motor position (make sure holder is UP)
+    leaky.open_block_holder()
+
+
+    # set up proximity sensor active line
+    gp.setup(proxPin, gp.OUT)
+
+	# Set up adaptive image thresholding, warp maps and any remaining masks
+	logging.debug("Initialising HSV thresholding ... ")
+	init_frame = picam.read()
+    init_crop = init_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
+    # update boundary functions (assumes we have some blocks visible)
+    print("Identify green peak:")
+    l_green, u_green = lns.boundary_estimate(init_crop.copy(), lg_bound, ug_bound, 20, 255, 0, 255, 15)
+    print("Identify red peak:")
+    l_red, u_red = lns.boundary_estimate(init_crop.copy(), lr_bound, ur_bound, 90, 255, 180, 240, 10)
+    logging.debug(" ... setting up unwarp map ...")
+    xmap, ymap = lns.buildMap(600,600, 720, 360, 300, cp[0], cp[1])
+
+    print(" ... initialise tracking mask: ")
+    o_width, tracking_mask, unwrap_gray = lns.init_tracking_mask(xmap, ymap, l_red, u_red, init_crop.copy(), wide_mask.copy())
+
+    logging.debug("...Done")
+
+	# Set RUNFlAG to true
+	RUNFLAG = True
+	# fcount = 1
+    # kill_count = 1
+	
+	# set up file:
+	date = str(221219)
+	trial = "_trial1.txt"
+	logname = "./TestIm/" + date + trial
+
+	# Set experiment time to current time
     winset = 0
+    start_lk_time = time.time()
     
-    stdscr.addstr("Waiting for block ... \n")
+    print("Waiting for block ...")
 
-    home_drive_flag = 0
-    
-    while running:
-        # STATE CHECK
-        #print("State check", leaky1.direction, leaky1.cam_flag, leaky1.threshold_state, leaky1.state)
-        
-        # if we have windows open, use waitkey
-        if winset:
-            key = cv2.waitKey(1) & 0xFF
-        else:
-            key = stdscr.getch()
-        
-        # CHECK FOR BUTTON PUSHES
-        if leaky1.is_waiting() or leaky1.is_deposit():
-            try:
-                block_trigger = 1.0 - block_pin.read()
-                if block_trigger > 0.05:
-                    stdscr.addstr(str(block_trigger))
-                    stdscr.addstr(" \n")
-                    leaky1.button_push()
-                
-            except Exception as e:
-                stdscr.addstr("problem reading board, retry ... \n")
-                print(e) # output to main terminal so we can see on exit
+	# Open text file to write events and timing
+    with open(logname, "a") as storefile:
+
+    	while RUNFLAG:
+    		looptime = time.time()
+			# Wait for block: Try/Except loop for reflectance sensor
+
+			if leaky1.is_waiting():
+                try:
+                	block_trigger = lns.get_block_reading(refPin)
+                    if block_trigger < 50:
+                        print("Triggered, " , block_trigger)
+                        storefile.write("Block trigger: " + str(time.time()-start_lk_time) + "\n")
+                        
+                        # pick a random direction, close block holder, turn around
+                        leaky.set_turn_status()
+                        leaky.block_sensed()
+                        time.sleep(0.1)
+                        leaky.generic_turn(1.2) # this needs to be about 180
+
+
+			# Get camera frame
+            full_frame = picam.read()
+            omni_frame = full_frame[y_crop_min:y_crop_max, x_crop_min:x_crop_max,:]
+
+
+            if (leaky.is_turning()) or (leaky.is_deposit()) or (leaky.is_backup()):
+
+                # Eac loop, move in pre-set direction, then stop and run appropriate sensing subfunction
+                leaky.auto_set_motor_values(leaky.speed, leaky.speed)
+
+
+                # ------ SENSOR SUBFUNCTIONS ------ #
+                if (leaky.is_turning()):
+                  if leaky.high_humidity:    
+
+                        rednum = lns.leaving_home(cp, omni_frame, wide_mask, l_red, u_red)
+                        # ---------------------------------
+                        # make sure we cannot see home base, try to balance walls
+                        if rednum > 0:
+                            logging.debug("Balancing - can see red bars: ", rednum)
+                            #just keep turning
                             
-        
-        # FILTER CAMERA FRAMES
-        right_frame = webcam.read()
-        left_frame = picam.read()
-        
-        # If we are  - turning, backing up, depositing (ie doing anything that involves looking)
-        # set wheel values
-        # sleep for (0.1) or whatever
-        # set wheel values to zero while we sense
-        # while time < sense_time
-        #    check wall balancing values
-        #    check edge values
-        #    trigger any requisite state changes
-            
-
-        #if (leaky1.is_turning()) or (leaky1.is_deposit()) or (leaky1.is_backup()) or (leaky1.is_go_home()):
-            # figure out motor values
-            # set motor values
-        #    time.sleep(0.1)
-        #    start_time = time.time()
-            # set motor values to zero
-        #    while (time.time() - start_time < sense_delay):
-        #        if (leaky1.is_turning()):
-                    
-                # check blue wall balancing (don't thread)
-                # OR
-                # check red wall balancing
-                # OR
-                # do edge finding 
-                
-                # handle whatever has been trigered, depending on state
-                # loop a few times in case the vision is lagging
-                # now fall through
-
-        # check for wall balancing (thread this so it interrupts)
-        if (leaky1.is_turning()):
-            leaky1.set_motor_values(0,0)
-            balancetime = time.time()
-
-            while (time.time() - balancetime) < 0.3 :
-	        blue_thread = threading.Thread(target=check_balance, args=(left_frame, right_frame, l_blue_left, u_blue_left, l_blue_right, u_blue_right, 550000.0, 550000.0, 0.0, 5.0, 1, )).start()                
-
-            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
-            time.sleep(0.1)
-            
-        elif (leaky1.is_backup() or leaky1.is_go_home()) and not home_drive_flag:
-            balancetime =time.time()
-            while (time.time() - balancetime) < 0.3 :
-	        red_thread = threading.Thread(target=check_balance, args=(left_frame, right_frame, l_red_left, u_red_left, l_red_right, u_red_right, 500000.0, 600000.0, 0.0, 1.5, 0, )).start()
-
-            home_drive_flag = 1
+                        else:
+                            heading_angle = lns.omni_balance(cp, omni_frame, sides_mask, l_green, u_green)
+                            if (heading_angle > 2.75) or (heading_angle < -2.75) :
+                                logging.debug('walls balanced!')
+                                leaky.walls_balanced()
+    
+                            elif heading_angle > 0: leaky.cam_flag = 1
+                            elif heading_angle < 0: leaky.cam_flag = 0
+                            else: logging.debug('no walls in view') 
+					
+					else: # we must be looking for a deposition spot
+                        blob_num, heading_angle, maxminbox, box_ratio = lns.omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
+    
+                        if blob_num > 0 and ((min(maxminbox) < 220) or max(maxminbox > 560)):
+                            logging.debug("Visual overlap. Moving to deposition")
+                            leaky.wall_found()
 
 
-        if leaky1.is_turning():
-            if blue_left_wall > 5: 
-	        if (np.abs(blue_walls_match) < 2) or (np.abs(np.sign(blue_walls_match) + np.sign(blue_wm_prev))< 0.5):
-        	    leaky1.walls_balanced()
-                    # ensures each cycle starts with no edge found flag
-                    deposit_edge = False
-                    backup_edge = False
+                elif leaky.is_deposit(): # This won't guarantee the block is deposited on a wall, but it will try damn hard
+                    blob_exists = 0
+                    bend_exists = 0
+                    ratio_exists = 0
 
-        if winset:
-            cv2.imshow("Left camera", left_frame)
-            cv2.imshow("Right camera", right_frame)
-                                                
-        blue_wm_prev = blue_walls_match
-        
-        if deposit_edge and leaky1.is_turning():
-            leaky1.wall_found()
-            backup_edge = False
-            
-        elif leaky1.start_turning_frame and (leaky1.is_turning() or leaky1.is_deposit()):
-            # toggle turns on and off to let visual sensors catch up
-            # manually hacking the background update cycle
-            leaky1.set_motor_values(0,0)
-            if leaky1.cam_flag:
-                deposit_edge = find_edge(left_frame,  l_blue_left, u_blue_left, leaky1.threshold_state, leaky1.cam_flag, 640-found_edge_threshold)
-                backup_edge = find_edge(left_frame,  l_blue_left, u_blue_left, leaky1.threshold_state, leaky1.cam_flag, 640-back_up_threshold)
-                cv2.circle(left_frame, (cX,cY), 7, (255,0,0), -1)
-        
-            else:
-                deposit_edge = find_edge(right_frame, l_blue_right, u_blue_right, leaky1.threshold_state, leaky1.cam_flag, found_edge_threshold)
-                backup_edge = find_edge(right_frame,  l_blue_right, u_blue_right, leaky1.threshold_state, leaky1.cam_flag, back_up_threshold)
-                cv2.circle(right_frame, (cX,cY), 7, (255,0,0), -1)
-                
-            if ccount > 5:
-                leaky1.start_turning_frame = 0
+                    # make sure appropriate channel is selected
+                   	for attempt in range(3):
+						try: 
+							tca_bus.writeRaw8(adc_chan)
+						except:
+							print("Trouble communicating with TCA multiplexer, trying again ...")
 
-            ccount += 1
-        
-        
-        elif leaky1.is_turning() and not leaky1.high_humidity: 
-            leaky1.start_turning_frame = 1
-            ccount = 0                
-            leaky1.on_enter_turning()
-            time.sleep(0.1)
-            
-        elif leaky1.is_deposit():
-            leaky1.set_motor_values(leaky1.speed, leaky1.speed)
-            ccount += 1
-            leaky1.start_turning_frame=1
-            time.sleep(0.1)
-            # quick hack
-            if ccount > 5:
-                backup_edge = True
-        
-        # hopefully that's all our turning code
-        if backup_edge and leaky1.is_deposit():
-            leaky1.reached_wall()
-            deposit_edge = False
-            backup_edge = False
-        
-        if (np.abs(home_match) < 1.5) and leaky1.is_backup() and (left_home > 2):
-            leaky1.home_spotted()
-            
-        elif leaky1.is_go_home():            
-            if (left_home > 25) or (right_home > 25):
-                stdscr.addstr("I'm home! Waiting ... \n")
-                leaky1.close_to_home()
-                    
-            elif home_drive_flag:
-                left_speed = leaky1.speed - 2*home_match
-                right_speed = leaky1.speed + 2*home_match
-                if np.abs(home_match) > 3:
-                    leaky1.set_motor_values(int(left_speed), int(right_speed))
-                else:
-                    leaky1.set_motor_values(leaky1.speed, leaky1.speed)
+					# Try flex sensor readings: F1 is obstructed by block holder, look at F2 only
+					f2_read = 0
+					bend_av_counter = 0
+					for flexloop in range(4):
+	                    try:
+        	                f2 = lns.get_adc_reading(adc, right_flex_chan, FLEXGAIN)
+        	                f2_read += f2
+        	                bend_av_counter += 1
+        	                time.sleep(0.005)
 
-                time.sleep(0.1)
-                home_drive_flag = 0
+        	            except: 
+        	            	print("problems logging flex sensor data ...")
 
-            else:
-                leaky1.set_motor_values(0,0)
+        	        if bend_av_counter > 0:
+                        f2_read /= bend_av_counter
+                        f2_read = f2_read - f2_av
+            	        logging.debug("bend sensing: ", f2_read)
+    
+
+                    blob_num, heading_angle, minmaxbox, box_ratio = lns.omni_deposit(cp, omni_frame, wide_mask, l_green, u_green, xmap, ymap)
+    
+    				# Set feature detector flags and call localisation calculator
+    				if blob_num > 0: blob_exists = 1
+    				if abs(f2_read) > 20: bend_exists = 1
+    				if box_ratio > 1.5: ratio_exists = 1
+
+
+    				new_prob = lns.localisation_prob(leaky.prev_prob, bend_exist, ratio_exist, walls_exist):
+    				leaky.prev_prob = new_prob
+
+    				if (new_prob > 0.75): 
+                        leaky.reached_wall()
+                        continue
+
+                    if blob_num < 2 and (abs(heading_angle) > 2.6):
+                        leaky.direction = 'fwd'
+    
+                    elif (blob_num>1) or (abs(heading_angle) < 2.6):
+                        leaky.direction = 'turn'
+    
+                        if abs(heading_angle < 2.6):
+                            if heading_angle > 0: leaky.cam_flag = 0
+                            elif heading_angle < 0: leaky.cam_flag = 1
+    
+                    logging.debug('Direction update: ',leaky.cam_flag, leaky.direction, heading_angle)
+
+                elif (leaky.is_backup()):
+                    # we are just looking for rear wall, then we transition to homing algorithm
+                    red_num = lns.omni_home(cp, omni_frame, front_mask, l_red, u_red)
 
     
-        # CHECK HUMIDITY DATA
-        # nB: reading from the humidity sensors is SLOW
-        
-        if leaky1.is_sensing():
-            if (time.time() - leaky1.sensing_clock < 10):
-                # Read all sensors - ok here's a question
-                # do I have to read the sensors for them to settle?
-                
-                # TODO: once we are sure humidity bubble is working
-                # try just reading once, at the end of the sensing pause
-                time.sleep(0.1)
-
-                hum_count = 0                
-                for sens_i in sens_array:
-                    try:
-                        temp_new = sens_i.read_t()
-                        hum_new = sens_i.read_rh()
-                        #print("Sensor read: ", hum_new)
-                        #stdscr.addstr(" \n")
-                        hum_count +=1
-                        
-                    except Exception as e:
-                        print("Sensor problem: ", (hum_count+1))
-                        #stdscr.addstr("Sensor problem \n")
-
-                
-            else: # last sensor reading
-                stdscr.addstr("Entering final sensor read ...\n")
-                hum_sum = 0
-                hum_count = 0
-                for sens_i in sens_array:
-                    try:
-                        temp_new = sens_i.read_t()
-                        hum_new = sens_i.read_rh()
-                        print("Final read: ", int(temp_new), int(hum_new))
-                        hum_sum = hum_sum + hum_new
-                        hum_count += 1
-                        
-                    except Exception as e:
-                        print("Sensor problem: ", (hum_count+1))
-                        stdscr.addstr("continue ... \n")
-
-                        #print(e) # output to main terminal to catch on exit
-                    
-                if hum_count > 0:
-                    hum_av = hum_sum/hum_count
-                    print("Average humidity: ", int(hum_av))
-                    stdscr.addstr(" \n")
-                    
-                    if hum_av < hum_threshold:
-                        leaky1.high_humidity = False
-                        leaky1.low_humidity()
-                                
+                    logging.debug("Looking for entrance, Markers seen: ", red_num)
+                    if (red_num < 2):
+                        leaky.direction='revturn'
                     else:
-                        # transitions to driving
-                        leaky1.humidity_maintained()
-                
-                else:
-                    stdscr.addstr("no sensors available, starting again \n")
-                    leaky1.sensing_clock = time.time()
+                        leaky.have_block = False
+                        kill_count = 0 # failsafe, shouldn't need this
+                        leaky.home_spotted()
 
-                
 
-        elif leaky1.is_driving():
-            if (time.time() - leaky1.driving_clock < 0.5):
-                time.sleep(0.1)
+            elif leaky.is_go_home():
+                homing = True
+    
+                while homing:
+                	# Check proximity value:
+                	gp.output(proxPin, True)
+                	time.sleep(0.04)
+                	gp.output(proxPin, False)
+
+                	# make sure we are reading from adc channel (shouldn't have changed, but better safe)
+                	for attempt in range(3):
+						try: 
+							tca_bus.writeRaw8(adc_chan)
+						except:
+							print("Trouble communicating with TCA multiplexer, trying again ...")
+
+					for i in range(3):
+						# crappy averaging filter to avoid jumps - can also use lowpass filter in lns
+						close = 0
+	                	distance = lns.get_adc_reading(adc, prox_chan, PROXGAIN)
+	                	if distance > 900:
+	                		close += 1                	
+
+                    else: 
+                    	red_num, red_centre, red_frame = lns.omni_home(cp, omni_frame, front_mask, l_red, u_red)
+	                    # set direction:
+    	                lns.homing_direction(red_cent)
+
+    	                # turn or move forward (don't turn too much)
+    	                if leaky.direction=='fwd':
+    	                	if close > 2:
+		                		logging.debug("Close to wall, stopping")
+        		        		homing = False
+                				leaky.close_to_home()
+		                    
+		                    else:
+			                    leaky.auto_set_motor_values(leaky.speed, leaky.speed)
+    			                time.sleep(0.2)
+        			            leaky.auto_set_motor_values(0,0)
             
-            else:
-                leaky1.stop_driving()
-        
-               
-        fcount += 1
-        
-        if key == ord("q"):
-            running=False
-            break
-    
-    
-    board.exit()
-    webcam.stop()
-    picam.stop()
+                  		else:
+                  			leaky.auto_set_motor_values(leaky.speed, leaky.speed)
+                  			time.sleep(0.08)
+                  			leaky.auto_set_motor_values(0,0)
+
+            if winset:
+                cv2.imshow("Camera view", show_frame)
+                key = cv2.waitKey(1) & 0xFF 
+
+			if leaky.is_sensing():
+				# Cycle through multiplexer channels:
+
+				hum_av = 0
+				sens_count = 0
+
+				# Could put this in subfunction maybe
+				for channel in humidity_channels:
+					for attempt in range(2):
+						try: 
+							tca_bus.writeRaw8(channel)
+						except:
+							print("Trouble moving to TCA device, retry ...")
+
+					sht_instance = SHT85_I2C()
+					error = sht_instance.StartPeriodicMeasurement(sc.PERI_MEAS_HIGH_1_HZ)
+					logging.debug(error)
+
+					loop = 3
+					hum = 0
+					while loop > 0:
+						# read a couple of times, keep last value
+						temp, hum, error = sht_instance.SHT85_ReadBuffer()
+						logging.debug("Humidity reading: ", hum)
+						time.sleep(1)
+						loop -= 1
+
+					error = sht_instance.StopPeriodicMeasurement()
+
+					if hum > 0:
+					hum_av += hum
+					sens_count += 1
+
+				# after all sensors have been checked:
+				if sens_count > 0:
+					hum_av /= sens_count
+					logging.debug("Average humidity reading: ", hum_av)
+					logging.debug("Sensors active: ", sens_count)
+                else:
+                    print("No sensors available, starting again")
+                    leaky.sensing_clock = time.time()
+
+                if (time.time() - leaky1.sensing_clock > 10):
+                	# check threshold, move or change state:
+                    if hum_av < hum_threshold:
+        	            leaky.high_humidity = False
+        	            storefile.write("Humidity reading: " + str(hum_av))
+            	        storefile.write("New deposition: " + str(time.time() - start_lk_time) + "\n")
+ 	                    leaky.low_humidity()
+                	else:
+                		storefile.write("Humidity reading: " + str(hum_av))
+                        storefile.write("Driving ... \n")
+                        leaky.humidity_maintained()
+                    
+            elif leaky1.is_driving():
+                if (time.time() - leaky1.driving_clock < 0.2):
+                    time.sleep(0.1)
+                
+                else: leaky1.stop_driving()
+            
+            #prev_frame = save_frame
+            fcount += 1
+            
+            if winset:
+                if key == ord("q"):
+                    running=False
+                    break
+            print(time.time() - looptime)
+
+
+	# Shutdown Leaky
+	logging.debug("Finished deposition cycle")
+
     shutdownLeaky()
 
 
 
 if __name__ == '__main__':
-	curses.wrapper(main)
+	main()
 

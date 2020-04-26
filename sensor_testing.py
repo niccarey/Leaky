@@ -7,8 +7,8 @@ gp.setmode(gp.BCM)
 
 gp.setup(11, gp.OUT)
 gp.setup(17, gp.IN)
+gp.setup(23, gp.IN)
 gp.setup(27, gp.IN)
-gp.setup(22, gp.IN)
 # usage: ST(clock pin, data pin) (default voltage)
 
 # have to use correct voltage option - default is 3.5V, otherwise
